@@ -16,14 +16,13 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
 ## 当前焦点
-- 当前里程碑：M1 代码完成（commit 1ff7c99，分支 feat/usbip-emulation）。23/23 测试通过；DEVLIST/IMPORT 协议级集成测试 + 真实二进制端到端冒烟通过；**真机内核级注入验证待用户硬件**（本机无 vhci_hcd/sudo，详见 journal/M1-REPORT.md）。自动接力范围 = M1 收尾 → M2a（纯功能）；**M2b（UI）与 M3 必须停在等待用户确认的状态，接力会话不得自行开工 UI**。D8 内置中继默认不做。
-- 下一步精确动作（M2a 连接层功能，新会话从这里开始）：
-  1. 读 `mousehop/src/connect.rs` 与 `listen.rs`，确认现状「谁拨谁」：激活客户端时由哪侧发起 DTLS、会话如何被两端共享（`ClientState.active_addr`、`ConnectionAttempt` 事件），以及反向会话是否已天然支持（对端拨入后本机能否把它当作可注入客户端）。
-  2. 设计 per-device「连接方式」字段：`TomlClient`（config.rs:95-128）与 `ClientConfig`（mousehop-ipc lib.rs:345-398）新增 `connect_mode: direct|reverse`（forward 场景已被「自定义 host:port 地址」覆盖，仅补文档；若调查发现无需新字段即可反拨，则字段只服务 UI 语义与校验）。**不动 mousehop-proto**。
-  3. 实现反向外呼路径：受限侧 daemon 主动拨出对端并维持会话；确保未拨入成功时 UI/日志给出可操作提示。
-  4. `mousehop-cli` 增加对应设置/查询；两实例本机回环互测（两个 config、两个端口）。
-  5. `RUSTUP_TOOLCHAIN=1.96.1 cargo fmt/clippy/test`（1.95.0 钉子未安装且离线，见 D9）。
-  6. 完成后执行交接三步并继续排自动接力；M2a 完成后停止，等用户确认 M2b。
+- 当前里程碑：**M2a-ii**（M2a 增量一已完成，commit e6d973b：`ConnectMode` 字段全链路 + 反向主动拨号/保活 + CLI；双实例验证：反向拨入→DTLS 握手→入站会话接受 全通，82+23 测试绿）。自动接力范围 = M2a-ii（纯功能）；**M2b（UI）与 M3 严禁开工**（等用户确认设计稿）；M2a-ii 完成后交接并**停止排程**，等用户确认。
+- 下一步精确动作（M2a-ii：让控制流走反向建立的会话）：
+  1. 现状（本会话已查明，勿重查）：会话角色与拨号方向耦合——拨号侧会话的收包只进 `capture.rs`（处理 Ack/Handover 等控制面，**不注入**），注入只发生在 `listen.rs`→`emulation.rs` 的入站侧；`MousehopConnection::send` 惰性拨号是唯一出站通道。
+  2. 桥接方案（D10）：a) 被控端 B：把 reverse 拨号建立的连接交给 emulation 侧——给 `MousehopListener` 加 `adopt(conn, peer_addr)`（复用其 `read_loop`/conns 表），拨号成功后调用；b) 控制端 A：`EmulationEvent::Connected` 时按 IP 匹配到 reverse 客户端的 handle，把已接受的连接「收养」进 `MousehopConnection.conns`（`set_active_addr` + 插入 ConnectionSlot），capture 的 send 路径零改动即可用；c) listener 侧需要一个通用的 `send_to(addr, event)`（现 `reply` 已可写，确认会话簿记兼容）。
+  3. 保活/心跳两套簿记（connect 侧 ping_sent_at 与 listener 侧 last_response）在收养路径上的兼容性要专门验证；握手 Hello 已双向要求（connect 侧发、listen 侧 `hello_watchdog` 查）。
+  4. 双实例验证：reverse 握手后，A 越边（或 CLI 触发 Enter）→ B 收到注入（B 用 X11 后端 `xdotool getmouselocation` 观察即可，本机 emulation backend=X11 可用）。
+  5. 完成后：交接三步，**停止排程**，输出 M2a 完整技术报告，等用户确认 M2b。
 
 ## 决策与死路（追加式）
 - 2026-10-22 初始化计划。
@@ -38,6 +37,8 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-23 [D8] 连接层新增 per-device「连接方式」：① 直连（现状，双向可拨）；② 反向外呼/单向隧道（网络受限侧主动外呼建立 DTLS 会话，拨号方向与 KVM 控制方向解耦，会话建立后双向可用）；③ 经转发端口（自定义 host:port，覆盖路由 DNAT 与 ssh -L/socat 场景；注意 ssh -L 为 TCP，UDP 需 UDP 隧道，文档给指引）。涉及 connect.rs 拨号方向选择与 ClientConfig 新字段，mousehop-proto 无需变更。**待确认**：②是否需要内置中继/TCP 隧道，还是仅 UI+拨号方向支持即可。
 - 2026-10-23 [D9] 工具链偏离：仓库钉 1.95.0 但未安装且 static.rust-lang.org 下载超时，本机一律以 `RUSTUP_TOOLCHAIN=1.96.1` 执行 fmt/clippy/build/test；CI（有网）仍用 1.95.0，网络恢复后应本地 `rustup toolchain install 1.95.0` 回归钉子。
 - 2026-10-23 [事实·M1] usbip crate 0.9 硬依赖 rusb+nusb（无 feature 可关）；ep0 控制传输按 `wIndex` 路由到目标接口 handler、中断传输按 endpoint 归属接口——复合设备（一设备双接口、一次 attach）成立；OP 码为 crate 自定义帧（REQ_DEVLIST 0x8005 / REP 0x0005 / REQ_IMPORT 0x8003 / REP 0x0003，版本 0x0111），集成测试据此手写帧。
+- 2026-10-23 [D10·M2a 拆分] 调查结论：Mousehop 会话角色与拨号方向耦合（拨号=发送角色、接听=注入角色），因此「输入流走反向隧道」需要会话角色桥接（收养入站连接进出站表 + 拨号侧收包注入仿真），改动面大，拆为 M2a-ii 单独做。M2a 增量一（e6d973b）交付 ConnectMode 配置全链路 + 被控端主动拨号/保活 + CLI；双实例验证反向拨入握手全通。「端口转发」场景由 direct + 指向转发地址（UDP 需转发）覆盖，README 已写明。
+- 2026-10-23 [事实·测试环境] 本机 listener 不绑 loopback（按真实网卡枚举），双实例回环测试须用真实 IP（10.8.15.60）+ 隔离 `XDG_RUNTIME_DIR`（IPC socket 路径）+ 各自 `--config/--cert-path/--port`；被控端本机 emulation 自动落到 X11 后端（无 Wayland/portal），xdotool 可验证注入。本机还跑着用户真实 mousehop（占 4242），测试端口用 43xx。
 
 ## 接力索引
 - 会话账本：`.relay/state.json`
