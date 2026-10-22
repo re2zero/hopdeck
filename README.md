@@ -574,14 +574,14 @@ The following sections detail the emulation and capture backends provided by mou
 
 ### Input Emulation Support
 
-| Desktop / Backend         | wlroots                  | libei                    | remote-desktop portal    | windows                  |   macos                                | x11                |
-|---------------------------|--------------------------|--------------------------|--------------------------|--------------------------|----------------------------------------|--------------------|
-| Wayland (wlroots)         | :heavy_check_mark:       |                          |                          |                          |                                        |                    |
-| Wayland (KDE)             |                          | :heavy_check_mark:       | :heavy_check_mark:       |                          |                                        |                    |
-| Wayland (Gnome)           |                          | :heavy_check_mark:       | :heavy_check_mark:       |                          |                                        |                    |
-| Windows                   |                          |                          |                          | :heavy_check_mark:       |                                        |                    |
-| MacOS                     |                          |                          |                          |                          |   :heavy_check_mark:                   |                    |
-| X11                       |                          |                          |                          |                          |                                        | :heavy_check_mark: |
+| Desktop / Backend         | wlroots                  | libei                    | remote-desktop portal    | windows                  |   macos                                | x11                | usbip              |
+|---------------------------|--------------------------|--------------------------|--------------------------|--------------------------|----------------------------------------|--------------------|--------------------|
+| Wayland (wlroots)         | :heavy_check_mark:       |                          |                          |                          |                                        |                    | :heavy_check_mark: |
+| Wayland (KDE)             |                          | :heavy_check_mark:       | :heavy_check_mark:       |                          |                                        |                    | :heavy_check_mark: |
+| Wayland (Gnome)           |                          | :heavy_check_mark:       | :heavy_check_mark:       |                          |                                        |                    | :heavy_check_mark: |
+| Windows                   |                          |                          |                          | :heavy_check_mark:       |                                        |                    | :warning: experimental |
+| MacOS                     |                          |                          |                          |                          |   :heavy_check_mark:                   |                    |                    |
+| X11                       |                          |                          |                          |                          |                                        | :heavy_check_mark: | :heavy_check_mark: |
 
 - `wlroots`: This backend makes use of the [wlr-virtual-pointer-unstable-v1](https://wayland.app/protocols/wlr-virtual-pointer-unstable-v1) and [virtual-keyboard-unstable-v1](https://wayland.app/protocols/virtual-keyboard-unstable-v1) protocols and is supported by most wlroots based compositors.
 - `libei`: This backend uses [libei](https://gitlab.freedesktop.org/libinput/libei) and is supported by GNOME >= 45 or KDE Plasma >= 6.1.
@@ -589,6 +589,7 @@ The following sections detail the emulation and capture backends provided by mou
 - `x11`: Backend for X11 sessions.
 - `windows`: Backend for Windows.
 - `macos`: Backend for MacOS.
+- `usbip`: Kernel-level injection via a loopback [USB/IP](https://github.com/jiegec/usbip) virtual HID device. **Requires extra setup on the receiving machine (root)**: the `vhci_hcd` kernel module plus a one-time `usbip attach` — run `scripts/usbip-receiver-setup.sh attach` there once. Because injection happens at the USB stack, it works regardless of compositor support (no libei portal needed) and is therefore never selected automatically; enable it explicitly via `emulation_backend = "usbip"` or `--emulation-backend usbip`. Windows receiving requires a third-party USB/IP client driver (e.g. [usbip-win](https://github.com/cezanne/usbip-win) forks) and is considered experimental.
 
 
 

@@ -28,6 +28,9 @@ mod xdg_desktop_portal;
 #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
 mod libei;
 
+#[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+mod usbip;
+
 #[cfg(target_os = "macos")]
 mod macos;
 
@@ -76,6 +79,12 @@ pub enum Backend {
     Xdp,
     #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
     X11,
+    /// Kernel-level injection via a loopback USB/IP virtual HID device.
+    /// Never probed automatically: it needs the receiver-side `vhci_hcd`
+    /// module plus a one-time `usbip attach`, so it only activates when
+    /// explicitly selected through config or CLI.
+    #[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+    Usbip,
     #[cfg(windows)]
     Windows,
     #[cfg(target_os = "macos")]
@@ -94,6 +103,8 @@ impl Display for Backend {
             Backend::Xdp => write!(f, "xdg-desktop-portal"),
             #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
             Backend::X11 => write!(f, "X11"),
+            #[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+            Backend::Usbip => write!(f, "usbip"),
             #[cfg(windows)]
             Backend::Windows => write!(f, "windows"),
             #[cfg(target_os = "macos")]
@@ -151,6 +162,8 @@ impl InputEmulation {
             Backend::Libei => Box::new(libei::LibeiEmulation::new().await?),
             #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
             Backend::X11 => Box::new(x11::X11Emulation::new()?),
+            #[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+            Backend::Usbip => Box::new(usbip::UsbipEmulation::new()?),
             #[cfg(all(unix, feature = "remote_desktop_portal", not(target_os = "macos")))]
             Backend::Xdp => Box::new(xdg_desktop_portal::DesktopPortalEmulation::new().await?),
             #[cfg(windows)]

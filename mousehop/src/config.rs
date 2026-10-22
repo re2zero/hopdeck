@@ -268,6 +268,9 @@ pub enum EmulationBackend {
     #[cfg(all(unix, feature = "x11_emulation", not(target_os = "macos")))]
     #[serde(rename = "x11")]
     X11,
+    #[cfg(all(unix, feature = "usbip_emulation", not(target_os = "macos")))]
+    #[serde(rename = "usbip")]
+    Usbip,
     #[cfg(windows)]
     #[serde(rename = "windows")]
     Windows,
@@ -289,6 +292,8 @@ impl From<EmulationBackend> for input_emulation::Backend {
             EmulationBackend::Xdp => Self::Xdp,
             #[cfg(all(unix, feature = "x11_emulation", not(target_os = "macos")))]
             EmulationBackend::X11 => Self::X11,
+            #[cfg(all(unix, feature = "usbip_emulation", not(target_os = "macos")))]
+            EmulationBackend::Usbip => Self::Usbip,
             #[cfg(windows)]
             EmulationBackend::Windows => Self::Windows,
             #[cfg(target_os = "macos")]
@@ -309,6 +314,8 @@ impl Display for EmulationBackend {
             EmulationBackend::Xdp => write!(f, "xdg-desktop-portal"),
             #[cfg(all(unix, feature = "x11_emulation", not(target_os = "macos")))]
             EmulationBackend::X11 => write!(f, "X11"),
+            #[cfg(all(unix, feature = "usbip_emulation", not(target_os = "macos")))]
+            EmulationBackend::Usbip => write!(f, "usbip"),
             #[cfg(windows)]
             EmulationBackend::Windows => write!(f, "windows"),
             #[cfg(target_os = "macos")]

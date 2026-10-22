@@ -47,6 +47,7 @@ ashpd = { version = "0.13.9", default-features = false, features = [
     "tokio",
 ], optional = true }
 reis = { version = "0.7.1", features = ["tokio"], optional = true }
+usbip = { version = "0.9", optional = true }
 
 [target.'cfg(target_os="macos")'.dependencies]
 bitflags = "2.6.0"
@@ -77,3 +78,4 @@ wlroots = [
 x11 = ["dep:x11"]
 remote_desktop_portal = ["dep:ashpd"]
 libei = ["dep:reis", "dep:ashpd"]
+usbip = ["dep:usbip"]

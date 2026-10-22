@@ -92,6 +92,7 @@ default = [
     "libei_emulation",
     "rdp_emulation",
     "x11_emulation",
+    "usbip_emulation",
 ]
 gtk = ["dep:mousehop-gtk"]
 layer_shell_capture = ["input-capture/layer_shell"]
@@ -101,6 +102,7 @@ libei_emulation = ["input-event/libei", "input-emulation/libei"]
 wlroots_emulation = ["input-emulation/wlroots"]
 x11_emulation = ["input-emulation/x11"]
 rdp_emulation = ["input-emulation/remote_desktop_portal"]
+usbip_emulation = ["input-emulation/usbip"]
 
 [package.metadata.bundle]
 name = "Mousehop"
