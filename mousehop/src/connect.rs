@@ -1,9 +1,10 @@
 use crate::client::ClientManager;
 use crate::config::local_commit;
 use crate::discovery::{PrimaryCache, normalize_mdns_name};
+use crate::emulation::EmulationRequest;
 use input_event::{Event as InputEvent, KeyboardEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
-use mousehop_ipc::{ClientHandle, ConnectionMode, DEFAULT_PORT};
+use mousehop_ipc::{ClientHandle, ConnectMode, ConnectionMode, DEFAULT_PORT};
 use mousehop_proto::{
     MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, ProtoEvent, decode_clipboard_event,
     decode_display_layout_event, decode_fixed_event, encode_clipboard_event,
@@ -316,8 +317,14 @@ pub(crate) struct MousehopConnection {
     /// to bias which address gets the handshake head-start. Empty
     /// when discovery is disabled or no peer hint has arrived yet.
     primary_hints: PrimaryCache,
-    /// Per-handle retry gate. Suppresses connect spawns when the
-    /// previous attempt failed and nothing new is available to dial,
+    /// Reverse-connect handoff: on a successful dial to a Reverse-mode
+    /// client, the finished transport is sent here so the listener
+    /// side can adopt it (the controlled side of a reverse tunnel
+    /// injects, so its dialed connection must serve the inbound role).
+    /// `None` in tests / send-only clones that never dial.
+    reverse_adopt: Option<Sender<EmulationRequest>>,
+    /// Per-handle retry gate. Suppresses connect attempts when the previous
+    /// attempt failed and nothing new is available to dial,
     /// so an offline peer doesn't trigger a fresh `connect_to_handle`
     /// (and the associated DNS / mDNS lookup churn) on every mouse
     /// event. Cleared on successful connect; bypassed automatically
@@ -330,6 +337,7 @@ impl MousehopConnection {
         cert: Certificate,
         client_manager: ClientManager,
         primary_hints: PrimaryCache,
+        reverse_adopt: Option<Sender<EmulationRequest>>,
     ) -> Self {
         let (recv_tx, recv_rx) = channel();
         Self {
@@ -343,6 +351,7 @@ impl MousehopConnection {
             ping_response: Default::default(),
             ping_sent_at: Default::default(),
             primary_hints,
+            reverse_adopt,
             retry_state: Default::default(),
         }
     }
@@ -403,6 +412,7 @@ impl MousehopConnection {
             ping_response: self.ping_response.clone(),
             ping_sent_at: self.ping_sent_at.clone(),
             primary_hints: self.primary_hints.clone(),
+            reverse_adopt: self.reverse_adopt.clone(),
             retry_state: self.retry_state.clone(),
         }
     }
@@ -516,6 +526,7 @@ impl MousehopConnection {
                 self.ping_response.clone(),
                 self.ping_sent_at.clone(),
                 self.primary_hints.clone(),
+                self.reverse_adopt.clone(),
                 self.retry_state.clone(),
             ));
         }
@@ -649,6 +660,93 @@ impl MousehopConnection {
         self.retry_state.borrow_mut().remove(&handle);
     }
 
+    /// Install a listener-accepted DTLS transport as `handle`'s
+    /// capture send path — the controller half of reverse-connect.
+    /// The inbound session was accepted by *our* listener because a
+    /// reverse-mode client dialed out to us; from here the capture
+    /// pipeline treats it like any dialed connection: hello handshake,
+    /// ping keepalive, and a receive loop for the control plane. The
+    /// listener-side read loop for this session ends on its own once
+    /// its entry is removed from the listener's table.
+    ///
+    /// Any dial already in flight for `handle` loses by generation:
+    /// the session allocated here supersedes it, so its completion is
+    /// discarded by the existing current-session check.
+    pub(crate) async fn adopt_inbound(
+        &self,
+        handle: ClientHandle,
+        conn: ArcConn,
+        addr: SocketAddr,
+    ) {
+        log::info!("client ({handle}) adopting inbound transport from {addr}");
+        let session = self.sessions.allocate(handle);
+        // Input stays gated until the adopted peer completes the
+        // protocol handshake and answers a ping, same as after a dial.
+        self.client_manager.set_alive(handle, false);
+        self.client_manager.set_active_addr(handle, Some(addr));
+        let replaced = self.conns.lock().await.insert(
+            addr,
+            ConnectionSlot {
+                handle,
+                session,
+                conn: conn.clone(),
+            },
+        );
+        if let Some(replaced) = replaced {
+            self.ping_response
+                .borrow_mut()
+                .remove(&(addr, replaced.session));
+            self.ping_sent_at
+                .borrow_mut()
+                .remove(&(addr, replaced.session));
+            let _ = replaced.conn.close().await;
+            if replaced.handle != handle
+                && self.sessions.is_current(replaced.handle, replaced.session)
+                && self.client_manager.active_addr(replaced.handle) == Some(addr)
+            {
+                self.client_manager.set_alive(replaced.handle, false);
+                self.client_manager.set_active_addr(replaced.handle, None);
+                self.client_manager.set_peer_commit(replaced.handle, None);
+                self.sessions
+                    .remove_if_current(replaced.handle, replaced.session);
+                let _ = self.recv_tx.send(MousehopConnectionEvent::Disconnected {
+                    handle: replaced.handle,
+                    session: replaced.session,
+                });
+            }
+        }
+
+        let hello_ok = Rc::new(Cell::new(false));
+        spawn_local(hello_handshake(addr, conn.clone(), hello_ok.clone()));
+
+        spawn_local(ping_pong(
+            self.client_manager.clone(),
+            handle,
+            addr,
+            session,
+            conn.clone(),
+            self.conns.clone(),
+            self.sessions.clone(),
+            self.recv_tx.clone(),
+            self.ping_response.clone(),
+            self.ping_sent_at.clone(),
+        ));
+
+        spawn_local(receive_loop(
+            self.client_manager.clone(),
+            handle,
+            addr,
+            session,
+            conn,
+            self.conns.clone(),
+            self.sessions.clone(),
+            self.recv_tx.clone(),
+            self.ping_response.clone(),
+            self.ping_sent_at.clone(),
+            hello_ok,
+        ));
+    }
+
     /// Decide whether to spawn another `connect_to_handle` for `handle`.
     /// Returns true (and refreshes the recorded signature) when:
     ///   - we have no prior attempt for this handle, or
@@ -713,6 +811,7 @@ async fn connect_to_handle(
     ping_response: Rc<RefCell<HashSet<(SocketAddr, ConnectionSession)>>>,
     ping_sent_at: Rc<RefCell<HashMap<(SocketAddr, ConnectionSession), Instant>>>,
     primary_hints: PrimaryCache,
+    reverse_adopt: Option<Sender<EmulationRequest>>,
     retry_state: Rc<RefCell<HashMap<ClientHandle, RetryState>>>,
 ) -> Result<(), MousehopConnectionError> {
     log::info!("client {handle} connecting ...");
@@ -789,6 +888,65 @@ async fn connect_to_handle(
             return Err(MousehopConnectionError::NotConnected);
         }
         log::info!("client ({handle}) connected @ {addr}");
+
+        // Reverse-connect: this host dials *out* to its controller
+        // because the controller cannot reach it inbound, and the
+        // controlled side is the one that injects — so the finished
+        // transport is handed to the listener, whose read loop becomes
+        // the connection's only reader. Capture-side bookkeeping is
+        // still installed so the reverse keepalive tick sees a live
+        // session (and re-dials after a drop) instead of finding
+        // nothing. `alive` is set without a Pong round-trip here: this
+        // side runs no receive loop to process one, and liveness is
+        // enforced by the listener heartbeat plus the controller's
+        // ping cycle.
+        if client_manager.connect_mode(handle) == ConnectMode::Reverse {
+            client_manager.set_alive(handle, true);
+            client_manager.set_active_addr(handle, Some(addr));
+            let replaced = conns_guard.insert(
+                addr,
+                ConnectionSlot {
+                    handle,
+                    session,
+                    conn: conn.clone(),
+                },
+            );
+            drop(conns_guard);
+            if let Some(replaced) = replaced {
+                ping_response.borrow_mut().remove(&(addr, replaced.session));
+                ping_sent_at.borrow_mut().remove(&(addr, replaced.session));
+                log::info!(
+                    "replacing prior outbound DTLS session {} for {addr}",
+                    replaced.session
+                );
+                let _ = replaced.conn.close().await;
+            }
+            remove_connecting_if_current(&connecting, handle, session).await;
+            retry_state.borrow_mut().remove(&handle);
+            match &reverse_adopt {
+                Some(adopt) => adopt
+                    .send(EmulationRequest::AdoptReverse {
+                        addr,
+                        conn: conn.clone(),
+                    })
+                    .expect("channel closed"),
+                None => {
+                    // No adopt channel wired (should not happen in a
+                    // wired service): fail the session cleanly instead
+                    // of leaving a slot nobody reads.
+                    log::warn!(
+                        "client {handle} is reverse-mode but no adopt channel is wired; \
+                         closing dialed connection"
+                    );
+                    let _ = conn.close().await;
+                    sessions.remove_if_current(handle, session);
+                    client_manager.set_alive(handle, false);
+                    client_manager.set_active_addr(handle, None);
+                }
+            }
+            return Ok(());
+        }
+
         // `alive` belongs to the authenticated protocol session, not merely
         // this client handle. A reconnect can otherwise inherit `true` from
         // the previous connection and send input before the new peer has
@@ -1581,7 +1739,7 @@ mod tests {
         let cert = Certificate::generate_self_signed(["mousehop-dial-reset-test".to_owned()])
             .expect("test certificate");
         let connection =
-            MousehopConnection::new(cert, client_manager.clone(), PrimaryCache::default());
+            MousehopConnection::new(cert, client_manager.clone(), PrimaryCache::default(), None);
         let session = connection.sessions.allocate(handle);
         connection.connecting.lock().await.insert(handle, session);
 
@@ -1617,7 +1775,7 @@ mod tests {
         let cert = Certificate::generate_self_signed(["mousehop-session-send-test".to_owned()])
             .expect("test certificate");
         let connection =
-            MousehopConnection::new(cert, client_manager.clone(), PrimaryCache::default());
+            MousehopConnection::new(cert, client_manager.clone(), PrimaryCache::default(), None);
         let old_session = connection.sessions.allocate(handle);
         let replacement_session = connection.sessions.allocate(handle);
         connection.conns.lock().await.insert(
@@ -1650,7 +1808,7 @@ mod tests {
         let cert = Certificate::generate_self_signed(["mousehop-release-cleanup-test".to_owned()])
             .expect("test certificate");
         let connection =
-            MousehopConnection::new(cert, client_manager.clone(), PrimaryCache::default());
+            MousehopConnection::new(cert, client_manager.clone(), PrimaryCache::default(), None);
         let session = connection.sessions.allocate(handle);
         let (conn, receiver, addr) = connected_test_conn().await;
         connection.conns.lock().await.insert(

@@ -19,6 +19,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::SocketAddr,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -26,6 +27,7 @@ use tokio::{
     sync::oneshot,
     task::{JoinHandle, spawn_local},
 };
+use webrtc_util::Conn;
 
 fn to_pp(peer: &IncomingPeerConfig) -> ReceivePostProcessing {
     ReceivePostProcessing {
@@ -274,7 +276,7 @@ pub(crate) enum EmulationEvent {
     },
 }
 
-enum EmulationRequest {
+pub(crate) enum EmulationRequest {
     Reenable,
     Release {
         addr: SocketAddr,
@@ -287,6 +289,23 @@ enum EmulationRequest {
     /// change, and whenever the user adjusts a peer's natural-scroll
     /// or sensitivity from the GUI.
     SetIncomingPeers(HashMap<String, IncomingPeerConfig>),
+    /// Reverse-connect, controlled side: a connection *we* dialed out
+    /// is registered with the listener so the ordinary inbound
+    /// pipeline (Hello watchdog, heartbeat, injection, replies) owns
+    /// it. See [`MousehopListener::adopt`].
+    AdoptReverse {
+        addr: SocketAddr,
+        conn: Arc<dyn Conn + Send + Sync>,
+    },
+    /// Reverse-connect, controller side: hand a still-current inbound
+    /// transport back to the caller (the capture side) and retire its
+    /// emulation-side bookkeeping. Replies `None` if the session was
+    /// already replaced or torn down.
+    TakeConn {
+        addr: SocketAddr,
+        session: ListenerSession,
+        reply: oneshot::Sender<Option<Arc<dyn Conn + Send + Sync>>>,
+    },
     Terminate,
 }
 
@@ -351,6 +370,39 @@ impl Emulation {
         self.request_tx
             .send(EmulationRequest::SetIncomingPeers(peers))
             .expect("channel closed")
+    }
+
+    /// Sender the connection layer uses to hand reverse-dialed
+    /// transports to the listener. Held by `MousehopConnection` and
+    /// sent on from its dial tasks; requests are served by the listen
+    /// task like any other [`EmulationRequest`].
+    pub(crate) fn adopt_channel(&self) -> Sender<EmulationRequest> {
+        self.request_tx.clone()
+    }
+
+    /// Take a still-current inbound transport away from the listener
+    /// (reverse-connect, controller side). Bounded wait: the listen
+    /// task shares our thread and answers promptly; `None` means the
+    /// session was replaced or torn down in the meantime.
+    pub(crate) async fn take_conn(
+        &self,
+        addr: SocketAddr,
+        session: ListenerSession,
+    ) -> Option<Arc<dyn Conn + Send + Sync>> {
+        const TAKE_CONN_TIMEOUT: Duration = Duration::from_secs(2);
+        let (reply, rx) = oneshot::channel();
+        self.request_tx
+            .send(EmulationRequest::TakeConn {
+                addr,
+                session,
+                reply,
+            })
+            .expect("channel closed");
+        tokio::time::timeout(TAKE_CONN_TIMEOUT, rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
     }
 
     pub(crate) async fn event(&mut self) -> EmulationEvent {
@@ -1132,6 +1184,31 @@ impl ListenTask {
                                 }).await;
                             }
                         }
+                    }
+                    EmulationRequest::AdoptReverse { addr, conn } => {
+                        self.listener.adopt(addr, conn).await;
+                    }
+                    EmulationRequest::TakeConn {
+                        addr,
+                        session,
+                        reply,
+                    } => {
+                        let taken = self.listener.take_conn(addr, session).await;
+                        if taken.is_some() {
+                            // The transport left for the capture side
+                            // and its read loop ends without publishing
+                            // a Disconnected — retire the per-session
+                            // bookkeeping here instead.
+                            last_response.remove(&addr);
+                            self.addr_to_fingerprint.remove(&addr);
+                            self.locked_hosts.remove(&addr);
+                            self.latest_host_input_states.remove(&addr);
+                            completed_handovers.remove(&(addr, session));
+                            legacy_enter_ready.remove(&(addr, session));
+                            input_owner_sessions.remove(&(addr, session));
+                            peer_capabilities.remove(&(addr, session));
+                        }
+                        let _ = reply.send(taken);
                     }
                     EmulationRequest::Terminate => break,
                 },

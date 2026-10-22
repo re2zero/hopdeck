@@ -299,6 +299,52 @@ impl MousehopListener {
         self.sessions.current.borrow().get(&addr).copied()
     }
 
+    /// Register an outbound-dialed DTLS transport (reverse-connect) as
+    /// if it had been accepted inbound: from here the listener's read
+    /// loop, heartbeat and reply path own it exactly like an accept.
+    /// Used by the controlled side of a reverse-mode client, whose
+    /// dialed connection must serve the *injection* role even though
+    /// it was established by dialing. The peer still has to complete
+    /// the protocol `Hello` handshake like any inbound session.
+    pub(crate) async fn adopt(&self, peer_addr: SocketAddr, conn: ArcConn) {
+        log::info!("adopting reverse-dialed DTLS connection to {peer_addr} as inbound session");
+        register_accepted_conn(
+            &self.listen_tx,
+            &self.conns,
+            &self.sessions,
+            peer_addr,
+            &conn,
+        )
+        .await;
+    }
+
+    /// Take a still-current accepted connection out of the listener's
+    /// table and hand it to the caller — the controller half of
+    /// reverse-connect, where an inbound session from a reverse-mode
+    /// client becomes the capture send path. The session's read loop
+    /// ends on its own (its table entry is gone) without publishing a
+    /// `Disconnected`, so callers that retire emulation-side
+    /// bookkeeping must do so themselves.
+    pub(crate) async fn take_conn(
+        &self,
+        addr: SocketAddr,
+        session: ListenerSession,
+    ) -> Option<ArcConn> {
+        let conn = {
+            let mut conns_guard = self.conns.lock().await;
+            match conns_guard.get(&addr) {
+                Some(slot) if slot.session == session => {
+                    conns_guard.remove(&addr).map(|slot| slot.conn)
+                }
+                _ => None,
+            }
+        };
+        if conn.is_some() {
+            self.sessions.remove_if_current(addr, session);
+        }
+        conn
+    }
+
     pub(crate) async fn terminate(&mut self) {
         self.listen_task.abort();
         let conns = self.conns.lock().await;
@@ -483,44 +529,7 @@ fn spawn_accept_task(
                 _ = sleep => continue,
                 c = listener.accept() => match c {
                     Ok((conn, addr)) => {
-                        log::info!("dtls client connected, ip: {addr}");
-                        let session = sessions.allocate(addr);
-                        let replaced = {
-                            let mut conns_guard = conns.lock().await;
-                            conns_guard.insert(
-                                addr,
-                                AcceptedConnection {
-                                    session,
-                                    conn: conn.clone(),
-                                },
-                            )
-                        };
-                        if let Some(replaced) = replaced {
-                            log::info!(
-                                "replacing prior DTLS session {} for reused peer address {addr}",
-                                replaced.session
-                            );
-                            let _ = replaced.conn.close().await;
-                        }
-                        let dtls_conn: &DTLSConn = conn.as_any().downcast_ref().expect("dtls conn");
-                        let certs = dtls_conn.connection_state().await.peer_certificates;
-                        let cert = certs.first().expect("cert");
-                        let fingerprint = crypto::generate_fingerprint(cert);
-                        listen_tx
-                            .send(ListenEvent::Accept {
-                                addr,
-                                session,
-                                fingerprint,
-                            })
-                            .expect("channel closed");
-                        spawn_local(read_loop(
-                            conns.clone(),
-                            sessions.clone(),
-                            addr,
-                            session,
-                            conn,
-                            listen_tx.clone(),
-                        ));
+                        register_accepted_conn(&listen_tx, &conns, &sessions, addr, &conn).await;
                     }
                     Err(e) => {
                         if let Error::Std(ref se) = e {
@@ -548,6 +557,58 @@ fn spawn_accept_task(
             };
         }
     })
+}
+
+/// Shared registration path for a freshly handshaked inbound DTLS
+/// connection, used by both the listener accept loop and
+/// [`MousehopListener::adopt`] (reverse-dialed transports). Allocates
+/// the session generation, replaces any prior connection from the
+/// same peer address, publishes `Accept`, and starts the read loop.
+async fn register_accepted_conn(
+    listen_tx: &Sender<ListenEvent>,
+    conns: &Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
+    sessions: &ListenerSessions,
+    addr: SocketAddr,
+    conn: &ArcConn,
+) {
+    log::info!("dtls client connected, ip: {addr}");
+    let session = sessions.allocate(addr);
+    let replaced = {
+        let mut conns_guard = conns.lock().await;
+        conns_guard.insert(
+            addr,
+            AcceptedConnection {
+                session,
+                conn: conn.clone(),
+            },
+        )
+    };
+    if let Some(replaced) = replaced {
+        log::info!(
+            "replacing prior DTLS session {} for reused peer address {addr}",
+            replaced.session
+        );
+        let _ = replaced.conn.close().await;
+    }
+    let dtls_conn: &DTLSConn = conn.as_any().downcast_ref().expect("dtls conn");
+    let certs = dtls_conn.connection_state().await.peer_certificates;
+    let cert = certs.first().expect("cert");
+    let fingerprint = crypto::generate_fingerprint(cert);
+    listen_tx
+        .send(ListenEvent::Accept {
+            addr,
+            session,
+            fingerprint,
+        })
+        .expect("channel closed");
+    spawn_local(read_loop(
+        conns.clone(),
+        sessions.clone(),
+        addr,
+        session,
+        conn.clone(),
+        listen_tx.clone(),
+    ));
 }
 
 /// Supervisor task: owns the set of active listeners, watches for
@@ -788,7 +849,13 @@ async fn read_loop(
     // foreign peer is rejected with a clear log instead of silently
     // half-working.
     let hello_ok = Rc::new(Cell::new(false));
-    spawn_local(hello_watchdog(addr, conn.clone(), hello_ok.clone()));
+    spawn_local(hello_watchdog(
+        conns.clone(),
+        addr,
+        session,
+        conn.clone(),
+        hello_ok.clone(),
+    ));
 
     loop {
         let n = match tokio::time::timeout(RECV_IDLE_TIMEOUT, conn.recv(&mut b)).await {
@@ -910,10 +977,21 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(12);
 /// Close `conn` if `hello_ok` is still unset after [`HELLO_TIMEOUT`].
 /// Reaching the close path means the peer never spoke a valid
 /// mousehop handshake — the listen-side enforcement of the hard
-/// cut-over from lan-mouse.
-async fn hello_watchdog(addr: SocketAddr, conn: ArcConn, hello_ok: Rc<Cell<bool>>) {
+/// cut-over from lan-mouse. The timeout only fires while our
+/// generation still owns the address: a session handed over to the
+/// capture side (reverse adoption) has left the connection table, and
+/// its orphaned watchdog — which can never observe the handshake that
+/// the new owner processes — must stand down instead of killing the
+/// adopted transport.
+async fn hello_watchdog(
+    conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
+    addr: SocketAddr,
+    session: ListenerSession,
+    conn: ArcConn,
+    hello_ok: Rc<Cell<bool>>,
+) {
     tokio::time::sleep(HELLO_TIMEOUT).await;
-    if !hello_ok.get() {
+    if !hello_ok.get() && accepted_connection_is_current(&conns, addr, session).await {
         log::warn!(
             "refusing {addr}: peer did not complete the mousehop handshake \
              within {HELLO_TIMEOUT:?} — closing connection"
@@ -986,6 +1064,47 @@ mod tests {
         assert_eq!(removed.session, session);
         assert!(Arc::ptr_eq(&removed.conn, &current));
         assert!(!conns.contains_key(&addr));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn take_conn_yields_only_the_current_generation() {
+        let addr: SocketAddr = "127.0.0.1:4242".parse().expect("test address");
+        let current = test_conn().await;
+        let sessions = ListenerSessions::default();
+        let stale = sessions.allocate(addr);
+        let active = sessions.allocate(addr);
+        let conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>> =
+            Rc::new(AsyncMutex::new(HashMap::from([(
+                addr,
+                AcceptedConnection {
+                    session: active,
+                    conn: current.clone(),
+                },
+            )])));
+        let (listen_tx, listen_rx) = local_channel::mpsc::channel();
+        let (request_port_change, _request_port_change_rx) = local_channel::mpsc::channel();
+        let (_port_changed_tx, port_changed) = local_channel::mpsc::channel();
+        let listener = MousehopListener {
+            listen_rx,
+            listen_tx,
+            listen_task: tokio::spawn(async {}),
+            conns,
+            sessions,
+            request_port_change,
+            port_changed,
+        };
+
+        assert!(listener.take_conn(addr, stale).await.is_none());
+        assert!(!listener.conns.lock().await.is_empty());
+
+        let taken = listener
+            .take_conn(addr, active)
+            .await
+            .expect("current session yielded");
+        assert!(Arc::ptr_eq(&taken, &current));
+        assert!(listener.conns.lock().await.is_empty());
+        assert_eq!(listener.current_session(addr), None);
     }
 
     #[test]

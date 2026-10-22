@@ -15,14 +15,24 @@ pub struct DummyInputCapture {
     start: Option<Instant>,
     interval: Interval,
     offset: (i32, i32),
+    /// Milliseconds to stay silent before emitting the one-shot
+    /// `Begin`. Read from `MOUSEHOP_DUMMY_CAPTURE_DELAY_MS` (default
+    /// 0). End-to-end tests use it to fire the synthetic crossing only
+    /// after peer connections have been established.
+    begin_delay: Option<Pin<Box<time::Sleep>>>,
 }
 
 impl DummyInputCapture {
     pub fn new() -> Self {
+        let begin_delay = std::env::var("MOUSEHOP_DUMMY_CAPTURE_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .map(|ms| Box::pin(time::sleep(Duration::from_millis(ms))));
         Self {
             start: None,
             interval: time::interval(Duration::from_millis(1)),
             offset: (0, 0),
+            begin_delay,
         }
     }
 }
@@ -67,6 +77,10 @@ impl Stream for DummyInputCapture {
     type Item = Result<(Position, CaptureEvent), CaptureError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(delay) = self.begin_delay.as_mut() {
+            ready!(std::future::Future::poll(delay.as_mut(), cx));
+            self.begin_delay = None;
+        }
         let current = ready!(self.interval.poll_tick(cx));
         let event = match self.start {
             None => {

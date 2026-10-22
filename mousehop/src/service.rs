@@ -18,9 +18,9 @@ use input_event::{ClipboardEvent, Event as InputEvent};
 use local_channel::mpsc::{Receiver, channel};
 use log;
 use mousehop_ipc::{
-    AppIdent, AsyncFrontendListener, ClientHandle, ConnectMode, ConnectionMode, FrontendEvent,
-    FrontendRequest, HostKind, IncomingPeerConfig, IpcError, IpcListenerCreationError, Position,
-    RemoteHostState, Status,
+    AppIdent, AsyncFrontendListener, ClientHandle, ConnectMode, ConnectionMode, DEFAULT_PORT,
+    FrontendEvent, FrontendRequest, HostKind, IncomingPeerConfig, IpcError,
+    IpcListenerCreationError, Position, RemoteHostState, Status,
 };
 use mousehop_proto::ProtoEvent;
 use std::{
@@ -229,11 +229,25 @@ impl Service {
         let listener =
             MousehopListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
         let primary_cache: PrimaryCache = Default::default();
-        let conn =
-            MousehopConnection::new(cert.clone(), client_manager.clone(), primary_cache.clone());
 
-        // input capture + emulation
+        // input capture + emulation. Emulation is wired before the
+        // connection layer: reverse-dialed transports travel from the
+        // dialer to the listener through the emulation request channel.
         let capture_backend = config.capture_backend().map(|b| b.into());
+        let emulation_backend = config.emulation_backend().map(|b| b.into());
+        let emulation = Emulation::new(emulation_backend, listener);
+        let conn = MousehopConnection::new(
+            cert.clone(),
+            client_manager.clone(),
+            primary_cache.clone(),
+            Some(emulation.adopt_channel()),
+        );
+
+        // Push the persisted authorized-peers table into the receive
+        // pipeline so per-peer post-processing is applied from the
+        // first incoming packet.
+        emulation.set_incoming_peers(authorized_keys.read().expect("lock").clone());
+
         let conn_for_service = conn.sender_clone();
         let capture = Capture::new(
             capture_backend,
@@ -241,12 +255,6 @@ impl Service {
             config.release_bind(),
             config.release_threshold_px(),
         );
-        let emulation_backend = config.emulation_backend().map(|b| b.into());
-        let emulation = Emulation::new(emulation_backend, listener);
-        // Push the persisted authorized-peers table into the receive
-        // pipeline so per-peer post-processing is applied from the
-        // first incoming packet.
-        emulation.set_incoming_peers(authorized_keys.read().expect("lock").clone());
 
         // create dns resolver
         let resolver = DnsResolver::new()?;
@@ -854,6 +862,7 @@ impl Service {
                     recovery.addr = addr;
                 }
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
+                self.maybe_adopt_reverse_session(addr, session).await;
             }
             EmulationEvent::PeerHello { addr, commit } => {
                 // Map the peer's source addr back to its client handle
@@ -1182,6 +1191,50 @@ impl Service {
                 log::debug!("reverse dial to client {handle} still pending: {e}");
             }
         }
+    }
+
+    /// Controller half of reverse-connect: an inbound DTLS session
+    /// whose source matches a Reverse-mode client is that client's
+    /// transport *to us* — take it away from the emulation side and
+    /// install it as the capture send path, so input flows out over
+    /// the tunnel the client dialed. Skipped when
+    ///  - the session's source address is one of the client's
+    ///    configured dial targets (the echo of our own reverse dial,
+    ///    which that client already adopted listener-side), or
+    ///  - the client already has a live transport (adoption fills a
+    ///    void; it never competes with an established session).
+    async fn maybe_adopt_reverse_session(&mut self, addr: SocketAddr, session: ListenerSession) {
+        let Some(handle) = self.client_manager.get_client(addr) else {
+            return;
+        };
+        if self.client_manager.connect_mode(handle) != ConnectMode::Reverse {
+            return;
+        }
+        let port = self.client_manager.get_port(handle).unwrap_or(DEFAULT_PORT);
+        let is_dial_echo = self
+            .client_manager
+            .get_ips(handle)
+            .unwrap_or_default()
+            .iter()
+            .any(|&ip| SocketAddr::new(ip, port) == addr);
+        if is_dial_echo {
+            log::debug!(
+                "inbound session {session} from {addr} echoes client {handle}'s own reverse dial; \
+                 leaving it emulation-side"
+            );
+            return;
+        }
+        if self.client_manager.active_addr(handle).is_some() {
+            log::debug!(
+                "skipping reverse adoption from {addr}: client {handle} already has a transport"
+            );
+            return;
+        }
+        let Some(conn) = self.emulation.take_conn(addr, session).await else {
+            log::debug!("reverse adoption of session {session} from {addr}: already gone");
+            return;
+        };
+        self.conn.adopt_inbound(handle, conn, addr).await;
     }
 
     /// Recompute the current-network fingerprint. On change, re-resolve

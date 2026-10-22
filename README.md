@@ -584,6 +584,14 @@ or with the CLI: `mousehop-cli set-connect-mode <id> reverse`. Peers behind a
 port forward / DNAT work with `direct` by pointing the client at the forwarded
 address — forward **UDP**, not just TCP (the transport is UDP+DTLS).
 
+Once the reverse session is up, the controller sends input over the
+connection the controlled machine dialed: mark the peer `reverse` on the
+controller too (same CLI command), and its inbound session is adopted as the
+controller's send path automatically. The tunnel is one-directional for
+input — the controlled machine can receive input over it, but driving the
+controller's pointer back across the same tunnel requires a session dialed
+in the other direction (future work).
+
 ## Detailed OS Support
 
 In order to use a device for sending events, an **input-capture** backend is required, while receiving events requires
