@@ -7,7 +7,7 @@
   "strict_stop": true,
   "auto_relay": false,
   "auto_relay_delay": 2,
-  "pending_auto_relay": true,
+  "pending_auto_relay": false,
   "current_milestone": "M1",
   "sessions": [
     {
