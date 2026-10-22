@@ -9,20 +9,15 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 
 ## 里程碑
 - [ ] M1 USB/IP 注入后端 PoC（分支 `feat/usbip-emulation`）—— 验收：QEMU 接收端注入键盘+鼠标成功；真机 Wayland（GNOME 45+/KDE 6.1+）与 X11 交叉验证；关闭 libei portal 后注入仍生效；`scripts/usbip-receiver-setup.sh`（vhci-hcd 加载 + loopback attach）交付；`cargo test -p input-emulation` 与 `cargo clippy --workspace` 通过。
-- [ ] M2a 连接层功能（2026-10-23 拆分；用户指示功能优先）—— 验收：ClientConfig 支持连接方式（直连 / 反向外呼 / 转发端口地址），daemon 拨号方向按配置执行；反向外呼场景两机可经单侧发起建立会话；`mousehop-cli` 可配置与验证；mousehop-proto 无变更。
+- [x] M2a 连接层功能（2026-10-23 拆分；用户指示功能优先）—— 验收：ClientConfig 支持连接方式（直连 / 反向外呼 / 转发端口地址），daemon 拨号方向按配置执行；反向外呼场景两机可经单侧发起建立会话；`mousehop-cli` 可配置与验证；mousehop-proto 无变更。（增量一 e6d973b：ConnectMode 全链路 + 反向拨号/保活 + CLI；增量二 = M2a-ii：控制输入流走反向隧道，双实例 E2E 注入验证通过，见 journal/M2a-REPORT.md）
 - [ ] M2b GPUI 控制端 UI（**挂起：等用户查看确认设计稿后再开始**）—— 验收：GPUI 应用（gpui-pre 0.3.9 + gpui-kit/ely 组件）完成设备添加与发现（自动扫描 / 手动 / 反向外呼三路径）+ 拖拽布局 + per-device 连接方式 + 发起一控多会话；接收端在 libei ↔ USB-IP 间切换后键鼠共享正常；GPUI 前端崩溃不影响 daemon；USB-IP 选项带「需要接收端配置」显式提示与可操作指引。开工前置：跑通 `Ely-GPUI-Components/compat/kit` 示例。
 - [ ] M3a 画面链路（可选，feature `video`，ely `RenderSurface` 显示）—— 验收：采集（PipeWire portal / DXGI）→ 硬编 → 独立通道 → 硬解 → RenderSurface 全链路可用，LAN 1080p 端到端 <150 ms；画面开关关闭后键鼠共享延迟与 CPU 占用对比 M2 基线无显著退化。
 - [ ] M3b 零拷贝渲染进程（可选进阶）—— 验收：独立 `mousehop-view` 进程（bite-gpui ^1.25 + gpui_interop 0.2.0）以 DMA-BUF/共享纹理导入显示，渲染路径无 CPU 像素拷贝；渲染进程崩溃不阻断键鼠与控制台。
 - 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
 ## 当前焦点
-- 当前里程碑：**M2a-ii**（M2a 增量一已完成，commit e6d973b：`ConnectMode` 字段全链路 + 反向主动拨号/保活 + CLI；双实例验证：反向拨入→DTLS 握手→入站会话接受 全通，82+23 测试绿）。自动接力范围 = M2a-ii（纯功能）；**M2b（UI）与 M3 严禁开工**（等用户确认设计稿）；M2a-ii 完成后交接并**停止排程**，等用户确认。
-- 下一步精确动作（M2a-ii：让控制流走反向建立的会话）：
-  1. 现状（本会话已查明，勿重查）：会话角色与拨号方向耦合——拨号侧会话的收包只进 `capture.rs`（处理 Ack/Handover 等控制面，**不注入**），注入只发生在 `listen.rs`→`emulation.rs` 的入站侧；`MousehopConnection::send` 惰性拨号是唯一出站通道。
-  2. 桥接方案（D10）：a) 被控端 B：把 reverse 拨号建立的连接交给 emulation 侧——给 `MousehopListener` 加 `adopt(conn, peer_addr)`（复用其 `read_loop`/conns 表），拨号成功后调用；b) 控制端 A：`EmulationEvent::Connected` 时按 IP 匹配到 reverse 客户端的 handle，把已接受的连接「收养」进 `MousehopConnection.conns`（`set_active_addr` + 插入 ConnectionSlot），capture 的 send 路径零改动即可用；c) listener 侧需要一个通用的 `send_to(addr, event)`（现 `reply` 已可写，确认会话簿记兼容）。
-  3. 保活/心跳两套簿记（connect 侧 ping_sent_at 与 listener 侧 last_response）在收养路径上的兼容性要专门验证；握手 Hello 已双向要求（connect 侧发、listen 侧 `hello_watchdog` 查）。
-  4. 双实例验证：reverse 握手后，A 越边（或 CLI 触发 Enter）→ B 收到注入（B 用 X11 后端 `xdotool getmouselocation` 观察即可，本机 emulation backend=X11 可用）。
-  5. 完成后：交接三步，**停止排程**，输出 M2a 完整技术报告，等用户确认 M2b。
+- **M2a 全部完成（含 M2a-ii，2026-10-23）**。已按计划停止自动排程：下一步是 **M2b（GPUI 控制端 UI），挂起中——等用户查看并确认设计稿后再开工**（设计稿：/home/zero/.zcode/v2/visualizations/97edd8bc06635e4af0dc6710e96b262848aa423f5b02ef52c79aa28b460977e9/mousehop-console-design.html）。M2b 开工前置：跑通 `Ely-GPUI-Components/compat/kit` 示例。**M3 严禁在 M2b 确认前开工。**
+- 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。
 
 ## 决策与死路（追加式）
 - 2026-10-22 初始化计划。
@@ -39,6 +34,10 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-23 [事实·M1] usbip crate 0.9 硬依赖 rusb+nusb（无 feature 可关）；ep0 控制传输按 `wIndex` 路由到目标接口 handler、中断传输按 endpoint 归属接口——复合设备（一设备双接口、一次 attach）成立；OP 码为 crate 自定义帧（REQ_DEVLIST 0x8005 / REP 0x0005 / REQ_IMPORT 0x8003 / REP 0x0003，版本 0x0111），集成测试据此手写帧。
 - 2026-10-23 [D10·M2a 拆分] 调查结论：Mousehop 会话角色与拨号方向耦合（拨号=发送角色、接听=注入角色），因此「输入流走反向隧道」需要会话角色桥接（收养入站连接进出站表 + 拨号侧收包注入仿真），改动面大，拆为 M2a-ii 单独做。M2a 增量一（e6d973b）交付 ConnectMode 配置全链路 + 被控端主动拨号/保活 + CLI；双实例验证反向拨入握手全通。「端口转发」场景由 direct + 指向转发地址（UDP 需转发）覆盖，README 已写明。
 - 2026-10-23 [事实·测试环境] 本机 listener 不绑 loopback（按真实网卡枚举），双实例回环测试须用真实 IP（10.8.15.60）+ 隔离 `XDG_RUNTIME_DIR`（IPC socket 路径）+ 各自 `--config/--cert-path/--port`；被控端本机 emulation 自动落到 X11 后端（无 Wayland/portal），xdotool 可验证注入。本机还跑着用户真实 mousehop（占 4242），测试端口用 43xx。
+- 2026-10-23 [D11·M2a-ii 实现] 反向隧道桥接（收养式，commit 见 HANDOFF-004）：a) 被控端 `connect_to_handle` 拨号成功后若 `ConnectMode::Reverse`：装 capture 侧簿记（slot + `set_alive(true)`——本侧无 receive_loop 处理 Pong，存活由 listener 心跳 + 控制端 ping 维持）后经 `EmulationRequest::AdoptReverse` 把 conn 交给 `MousehopListener::adopt`（accept 注册路径抽出为 `register_accepted_conn` 共用），不 spawn connect 侧三任务——listener read_loop 是唯一读者；b) 控制端 `EmulationEvent::Connected` → `maybe_adopt_reverse_session`：`get_client`（IP+active）+ Reverse + **非拨号回声**（addr == 该客户端配置拨号目标 ⇒ 是自己 dial 的回声，已由对端收养）+ **无活跃传输**（收养只填空，不抢现有会话）→ `EmulationRequest::TakeConn` 从 listener 取走 conn → `MousehopConnection::adopt_inbound`（alloc 新 session 使在途拨号被现有代际守卫自动废弃 + spawn hello/ping_pong/receive_loop），capture 发送路径零改动；c) 拨号回声两跳闭环：B 拨号→收养→listener Accept→Connected→B 侧判定 dial-echo 跳过二次收养。
+- 2026-10-23 [D12·bug 修复] accept 时 spawn 的 `hello_watchdog` 持 conn 引用，take_conn 收养后 12s 必杀已收养连接（T+12 掉线）——修复为关闭前校验 `accepted_connection_is_current`，已离开 listener 连接表的会话其孤儿 watchdog 退避。同时确认：僵尸 read_loop 收养后至多吃一个数据报即自退且不发布 Disconnected（现有 stale 守卫），Hello 重传预算（8×750ms）覆盖该一次性丢包。
+- 2026-10-23 [D13·已知限制] 反向隧道对输入是单向的：被控端可经隧道接收注入，但其控制端反向（B 控制 A）需反向拨号的会话，M2b/M3 前不做（README Connection Modes 已注明）。forward_log：capture 侧 conn2 类冗余连接（双方互标 reverse 且双向可达时）由 ping 无应答在 ~2s 内自清理，无需专门处理。
+- 2026-10-23 [事实·E2E 方法] 本机 X11 capture 是未实现 stub，`--capture-backend dummy` 是唯一 capture 路径；dummy 的 Begin 每后端实例仅一次，竞速 B 的 5s 拨号不可靠——在 `input-capture/src/dummy.rs` 加 `MOUSEHOP_DUMMY_CAPTURE_DELAY_MS`（默认 0，行为不变）使 Begin 可在隧道建立后确定性触发。E2E = Xvfb :93(A，dummy capture) / :94(B，X11 emulation 注入)，`xdotool getmouselocation` 持续变化即注入成功。
 
 ## 接力索引
 - 会话账本：`.relay/state.json`
