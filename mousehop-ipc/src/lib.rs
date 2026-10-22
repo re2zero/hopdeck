@@ -327,6 +327,45 @@ pub enum ConnectionMode {
     Fastest,
 }
 
+/// How the DTLS session toward this peer is established.
+///
+/// `Direct` (default) keeps the historical lazy behavior: the machine
+/// that wants to *send* dials on first use, so the session exists only
+/// while this side is controlling.
+///
+/// `Reverse` is the one-way-network lever: this machine proactively
+/// dials the peer while the client is active and keeps the session
+/// alive with pings — for a peer that cannot be reached inbound
+/// (firewalled laptop, NAT without port mapping) but can dial out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectMode {
+    /// Dial lazily on first send (historical behavior).
+    #[default]
+    Direct,
+    /// Dial proactively while the client is active and keep the
+    /// session alive; for peers that cannot be reached inbound.
+    Reverse,
+}
+
+#[derive(Debug, Error)]
+#[error("not a valid connect mode: {mode} — expected `direct` or `reverse`")]
+pub struct ConnectModeParseError {
+    mode: String,
+}
+
+impl FromStr for ConnectMode {
+    type Err = ConnectModeParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "direct" => Ok(Self::Direct),
+            "reverse" => Ok(Self::Reverse),
+            _ => Err(ConnectModeParseError { mode: s.into() }),
+        }
+    }
+}
+
 /// Physical kind of the network interface an address lives on, as
 /// classified by the *advertising* peer (interface type is invisible
 /// from L3, so the peer publishes it via mDNS TXT). Used purely for a
@@ -395,6 +434,11 @@ pub struct ClientConfig {
     /// user's selection.
     #[serde(default)]
     pub crossing_modifier: CrossingModifier,
+    /// How the session toward this peer is established. Defaults to
+    /// [`ConnectMode::Direct`]; see the type docs for the one-way
+    /// network motivation behind [`ConnectMode::Reverse`].
+    #[serde(default)]
+    pub connect_mode: ConnectMode,
 }
 
 impl Default for ClientConfig {
@@ -411,6 +455,7 @@ impl Default for ClientConfig {
             command_as_ctrl: false,
             require_crossing_modifier: false,
             crossing_modifier: CrossingModifier::default(),
+            connect_mode: ConnectMode::default(),
         }
     }
 }
@@ -756,6 +801,10 @@ pub enum FrontendRequest {
     /// (so picking "Auto"/"Fastest" in the GUI releases a pin set
     /// here). Other networks' locks are untouched.
     SetConnectionMode(ClientHandle, ConnectionMode),
+    /// Set how the session toward this client is established
+    /// ([`ConnectMode`]). `Reverse` also makes the daemon dial the
+    /// peer proactively while the client is active.
+    UpdateConnectMode(ClientHandle, ConnectMode),
     /// Pin the outbound address to `ip` on the machine's *current*
     /// network. The daemon computes the network fingerprint, so the
     /// GUI only sends the chosen IP. Numeric only (never a hostname)

@@ -5,7 +5,7 @@ use std::{net::IpAddr, time::Duration};
 use thiserror::Error;
 
 use mousehop_ipc::{
-    ClientHandle, ConnectionError, FrontendEvent, FrontendRequest, IpcError, Position,
+    ClientHandle, ConnectMode, ConnectionError, FrontendEvent, FrontendRequest, IpcError, Position,
     connect_async,
 };
 
@@ -58,6 +58,10 @@ enum CliSubcommand {
     SetPort { id: ClientHandle, port: u16 },
     /// set position
     SetPosition { id: ClientHandle, pos: Position },
+    /// set how the session to this client is established:
+    /// `direct` (dial on first send) or `reverse` (dial out proactively,
+    /// for peers that cannot be reached inbound)
+    SetConnectMode { id: ClientHandle, mode: ConnectMode },
     /// set ips
     SetIps { id: ClientHandle, ips: Vec<IpAddr> },
     /// re-enable capture
@@ -144,6 +148,10 @@ async fn execute(cmd: CliSubcommand) -> Result<(), CliError> {
         }
         CliSubcommand::SetPosition { id, pos } => {
             tx.request(FrontendRequest::UpdatePosition(id, pos)).await?
+        }
+        CliSubcommand::SetConnectMode { id, mode } => {
+            tx.request(FrontendRequest::UpdateConnectMode(id, mode))
+                .await?
         }
         CliSubcommand::SetIps { id, ips } => {
             tx.request(FrontendRequest::UpdateFixIps(id, ips)).await?

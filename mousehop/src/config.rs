@@ -17,8 +17,8 @@ use toml_edit::{self, DocumentMut};
 
 use mousehop_cli::CliArgs;
 use mousehop_ipc::{
-    ClipboardSuppression, ConnectionMode, CrossingModifier, DEFAULT_PORT, IncomingPeerConfig,
-    Position,
+    ClipboardSuppression, ConnectMode, ConnectionMode, CrossingModifier, DEFAULT_PORT,
+    IncomingPeerConfig, Position,
 };
 
 use input_event::scancode::{
@@ -105,6 +105,10 @@ struct TomlClient {
     /// configs → `Auto`. See [`mousehop_ipc::ConnectionMode`].
     #[serde(default)]
     mode: Option<ConnectionMode>,
+    /// Session establishment direction (`direct` | `reverse`). Absent
+    /// in legacy configs → `Direct`. See [`mousehop_ipc::ConnectMode`].
+    #[serde(default)]
+    connect_mode: Option<ConnectMode>,
     /// Per-network address locks, keyed by network fingerprint. Absent
     /// in legacy configs. See [`mousehop_ipc::ClientConfig::network_locks`].
     #[serde(default)]
@@ -351,6 +355,7 @@ pub struct ConfigClient {
     pub active: bool,
     pub enter_hook: Option<String>,
     pub mode: ConnectionMode,
+    pub connect_mode: ConnectMode,
     pub network_locks: HashMap<String, IpAddr>,
     pub clipboard_send: bool,
     pub command_as_ctrl: bool,
@@ -367,6 +372,7 @@ impl From<TomlClient> for ConfigClient {
         let port = toml.port.unwrap_or(DEFAULT_PORT);
         let pos = toml.position.unwrap_or_default();
         let mode = toml.mode.unwrap_or_default();
+        let connect_mode = toml.connect_mode.unwrap_or_default();
         let network_locks = toml.network_locks.unwrap_or_default();
         let clipboard_send = toml.clipboard_send.unwrap_or(false);
         let command_as_ctrl = toml.command_as_ctrl.unwrap_or(false);
@@ -380,6 +386,7 @@ impl From<TomlClient> for ConfigClient {
             active,
             enter_hook,
             mode,
+            connect_mode,
             network_locks,
             clipboard_send,
             command_as_ctrl,
@@ -431,6 +438,8 @@ impl From<ConfigClient> for TomlClient {
         // the lock map only when non-empty, so untouched configs don't
         // sprout new keys on every save.
         let mode = (client.mode != ConnectionMode::default()).then_some(client.mode);
+        let connect_mode =
+            (client.connect_mode != ConnectMode::default()).then_some(client.connect_mode);
         let network_locks = (!client.network_locks.is_empty()).then_some(client.network_locks);
         Self {
             hostname,
@@ -441,6 +450,7 @@ impl From<ConfigClient> for TomlClient {
             activate_on_startup,
             enter_hook,
             mode,
+            connect_mode,
             network_locks,
             clipboard_send,
             command_as_ctrl,
@@ -800,6 +810,7 @@ mod connection_mode_tests {
             active: true,
             enter_hook: None,
             mode,
+            connect_mode: ConnectMode::default(),
             network_locks: locks,
             clipboard_send: false,
             command_as_ctrl: false,
@@ -877,6 +888,34 @@ mod connection_mode_tests {
         // A non-default mode IS persisted.
         let toml: TomlClient = client_with(ConnectionMode::Auto, HashMap::new()).into();
         assert_eq!(toml.mode, Some(ConnectionMode::Auto));
+    }
+
+    #[test]
+    fn connect_mode_roundtrips_through_toml() {
+        // Direct stays implicit in the persisted file.
+        let toml: TomlClient = client_with(ConnectionMode::default(), HashMap::new()).into();
+        assert_eq!(toml.connect_mode, None);
+        // A non-default connect mode IS persisted and survives a reload.
+        let mut client = client_with(ConnectionMode::default(), HashMap::new());
+        client.connect_mode = ConnectMode::Reverse;
+        let toml: TomlClient = client.into();
+        assert_eq!(toml.connect_mode, Some(ConnectMode::Reverse));
+        let back: ConfigClient = toml.into();
+        assert_eq!(back.connect_mode, ConnectMode::Reverse);
+    }
+
+    #[test]
+    fn legacy_toml_without_connect_mode_uses_direct() {
+        let parsed: TomlClient = toml::from_str(
+            r#"
+            hostname = "host.local"
+            port = 4252
+            "#,
+        )
+        .expect("parse legacy client");
+        assert_eq!(parsed.connect_mode, None);
+        let cc: ConfigClient = parsed.into();
+        assert_eq!(cc.connect_mode, ConnectMode::Direct);
     }
 
     #[test]

@@ -18,9 +18,9 @@ use input_event::{ClipboardEvent, Event as InputEvent};
 use local_channel::mpsc::{Receiver, channel};
 use log;
 use mousehop_ipc::{
-    AppIdent, AsyncFrontendListener, ClientHandle, ConnectionMode, FrontendEvent, FrontendRequest,
-    HostKind, IncomingPeerConfig, IpcError, IpcListenerCreationError, Position, RemoteHostState,
-    Status,
+    AppIdent, AsyncFrontendListener, ClientHandle, ConnectMode, ConnectionMode, FrontendEvent,
+    FrontendRequest, HostKind, IncomingPeerConfig, IpcError, IpcListenerCreationError, Position,
+    RemoteHostState, Status,
 };
 use mousehop_proto::ProtoEvent;
 use std::{
@@ -145,6 +145,9 @@ pub struct Service {
     /// substantially-faster candidate beat the active path, gating the
     /// `Fastest`-mode auto-upgrade so noise can't trigger a switch.
     fastest_streak: HashMap<ClientHandle, u8>,
+    /// Reverse-mode clients kicked by activation but not yet served by
+    /// the periodic dial tick; drained by [`Self::on_reverse_dial_tick`].
+    pending_reverse_kicks: Vec<ClientHandle>,
 }
 
 /// Consecutive probe observations a faster candidate must win before
@@ -320,6 +323,7 @@ impl Service {
             recent_forwarded: HashMap::new(),
             clipboard_suppression,
             fastest_streak: HashMap::new(),
+            pending_reverse_kicks: Vec::new(),
         };
         Ok(service)
     }
@@ -350,6 +354,11 @@ impl Service {
         // already published once at startup
         discovery_refresh_tick.tick().await;
 
+        // Reverse-mode tunnel keepalive: pings establish / maintain the
+        // session this (controlled) machine dials out to its controller.
+        let mut reverse_dial_tick = tokio::time::interval(Duration::from_secs(5));
+        reverse_dial_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request).await,
@@ -363,6 +372,7 @@ impl Service {
                 }
                 _ = self.config.changed() => self.handle_config_change().await,
                 _ = discovery_refresh_tick.tick() => self.on_discovery_refresh().await,
+                _ = reverse_dial_tick.tick() => self.on_reverse_dial_tick().await,
                 event = recv_clipboard(&mut self.clipboard_monitor) => {
                     self.handle_local_clipboard_event(event).await;
                 }
@@ -516,6 +526,17 @@ impl Service {
                     self.conn.reset_handle(handle).await;
                     self.broadcast_client(handle);
                     self.save_config().await;
+                }
+            }
+            FrontendRequest::UpdateConnectMode(handle, connect_mode) => {
+                if self.client_manager.set_connect_mode(handle, connect_mode) {
+                    self.broadcast_client(handle);
+                    self.save_config().await;
+                    if connect_mode == ConnectMode::Reverse {
+                        // Establish the tunnel on the next loop pass rather
+                        // than waiting for the dial tick.
+                        self.pending_reverse_kicks.push(handle);
+                    }
                 }
             }
             FrontendRequest::SetNetworkLock(handle, ip) => {
@@ -701,6 +722,7 @@ impl Service {
                 active: s.active,
                 enter_hook: c.cmd,
                 mode: c.mode,
+                connect_mode: c.connect_mode,
                 network_locks: c.network_locks,
                 clipboard_send: c.clipboard_send,
                 command_as_ctrl: c.command_as_ctrl,
@@ -1142,6 +1164,26 @@ impl Service {
         self.refresh_network().await;
     }
 
+    /// Keep the tunnel alive for reverse-mode clients: while such a
+    /// client is active, send a ping every tick. On an established
+    /// session it is the ordinary heartbeat; with no session it is what
+    /// triggers the lazy dial inside `MousehopConnection::send` — the
+    /// one-way-network path where this (controlled) machine must dial
+    /// out because the controller cannot reach it inbound. Activation
+    /// kicks land in `pending_reverse_kicks` and are served here.
+    async fn on_reverse_dial_tick(&mut self) {
+        let mut kicks = std::mem::take(&mut self.pending_reverse_kicks);
+        kicks.extend(self.client_manager.active_clients());
+        for handle in kicks {
+            if self.client_manager.connect_mode(handle) != ConnectMode::Reverse {
+                continue;
+            }
+            if let Err(e) = self.conn.send(ProtoEvent::Ping, handle).await {
+                log::debug!("reverse dial to client {handle} still pending: {e}");
+            }
+        }
+    }
+
     /// Recompute the current-network fingerprint. On change, re-resolve
     /// every client's active lock and re-dial those whose lock moved so
     /// the new network's pin (or its absence) takes effect at once.
@@ -1370,6 +1412,10 @@ impl Service {
                 crossing_modifier,
             );
             self.broadcast_client(handle);
+            if self.client_manager.connect_mode(handle) == ConnectMode::Reverse {
+                // Dial out immediately instead of waiting up to a tick.
+                self.pending_reverse_kicks.push(handle);
+            }
             log::info!("activated client {handle} ({pos})");
         }
     }

@@ -8,7 +8,8 @@ use std::{
 use slab::Slab;
 
 use mousehop_ipc::{
-    ClientConfig, ClientHandle, ClientState, ConnectionMode, CrossingModifier, IfaceKind, Position,
+    ClientConfig, ClientHandle, ClientState, ConnectMode, ConnectionMode, CrossingModifier,
+    IfaceKind, Position,
 };
 
 use crate::config::ConfigClient;
@@ -36,6 +37,7 @@ impl ClientManager {
             pos: config_client.pos,
             cmd: config_client.enter_hook,
             mode: config_client.mode,
+            connect_mode: config_client.connect_mode,
             network_locks: config_client.network_locks,
             clipboard_send: config_client.clipboard_send,
             command_as_ctrl: config_client.command_as_ctrl,
@@ -379,6 +381,26 @@ impl ClientManager {
             .unwrap_or(false)
     }
 
+    pub(crate) fn connect_mode(&self, handle: ClientHandle) -> ConnectMode {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .map(|(c, _)| c.connect_mode)
+            .unwrap_or_default()
+    }
+
+    /// Update how the session toward this client is established.
+    /// Returns `true` only when the value changed.
+    pub(crate) fn set_connect_mode(&self, handle: ClientHandle, connect_mode: ConnectMode) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.connect_mode != connect_mode => {
+                c.connect_mode = connect_mode;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn set_require_crossing_modifier(
         &self,
         handle: ClientHandle,
@@ -659,6 +681,7 @@ mod tests {
             active: false,
             enter_hook: None,
             mode: ConnectionMode::Auto,
+            connect_mode: ConnectMode::Direct,
             network_locks: HashMap::new(),
             clipboard_send: false,
             command_as_ctrl: false,

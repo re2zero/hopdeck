@@ -563,6 +563,27 @@ The wire frame carries the originator's TLS certificate fingerprint. The Service
 - [x] Clipboard support (text, per-pair, with app-source suppression)
 
 
+## Connection Modes
+
+By default the session toward a peer is dialed lazily by whichever machine
+wants to *send* (`direct`). For one-way networks — a controlled machine that
+can dial out but cannot be reached inbound (firewalled laptop, NAT without a
+port mapping) — mark the peer `reverse` on the **controlled** machine. It then
+dials the controller proactively and keeps the session alive:
+
+```toml
+[[clients]]
+hostname = "archer-controller"
+ips = ["192.168.1.10"]
+port = 4242
+connect_mode = "reverse"
+activate_on_startup = true
+```
+
+or with the CLI: `mousehop-cli set-connect-mode <id> reverse`. Peers behind a
+port forward / DNAT work with `direct` by pointing the client at the forwarded
+address — forward **UDP**, not just TCP (the transport is UDP+DTLS).
+
 ## Detailed OS Support
 
 In order to use a device for sending events, an **input-capture** backend is required, while receiving events requires
