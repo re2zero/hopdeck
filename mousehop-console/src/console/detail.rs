@@ -3,8 +3,8 @@
 
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    AppContext, ClickEvent, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window,
+    AppContext, ClickEvent, Context, Div, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window,
     assets::IconName,
     component::{
         ActiveTheme, Disableable, Icon, Sizable, WindowExt,
@@ -114,7 +114,57 @@ impl Console {
             .child(self.render_kv("端口", entry.config.port.to_string().into(), muted))
             .child(self.render_kv("对端版本", peer_version(&entry.state), muted))
             .child(self.render_kv("往返延迟", latency_label(&entry.state), muted))
+            .child(self.render_trust_section(entry, cx))
             .child(self.render_device_actions(entry, cx))
+    }
+
+    /// Inline trust state (design D15): once the peer's fingerprint is
+    /// known (first inbound session) and authorized, show the record
+    /// with a guarded revoke. Devices without a fingerprint yet simply
+    /// render nothing here.
+    fn render_trust_section(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+        div().when_some(
+            entry
+                .state
+                .peer_fingerprint
+                .as_deref()
+                .and_then(|fp| self.authorized.get(fp).map(|peer| (fp, peer))),
+            |this, (fp, peer)| {
+                let fp = fp.to_string();
+                this.child(
+                    v_flex()
+                        .mt_1()
+                        .gap_1()
+                        .child(self.render_kv_section("信任", cx))
+                        .child(self.render_kv("状态", "已信任".into(), cx.theme().muted_foreground))
+                        .child(self.render_kv(
+                            "备注",
+                            peer.description.clone().into(),
+                            cx.theme().muted_foreground,
+                        ))
+                        .child(self.render_kv(
+                            "最近地址",
+                            peer.last_addr.clone().unwrap_or_else(|| "—".into()).into(),
+                            cx.theme().muted_foreground,
+                        ))
+                        .child(self.render_kv(
+                            "指纹",
+                            super::short_fingerprint(&fp).to_string().into(),
+                            cx.theme().muted_foreground,
+                        ))
+                        .child(
+                            Button::new("revoke-trust")
+                                .label("撤销信任")
+                                .ghost()
+                                .danger()
+                                .small()
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.confirm_revoke(fp.clone(), window, cx);
+                                })),
+                        ),
+                )
+            },
+        )
     }
 
     fn render_device_icon(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -537,6 +587,29 @@ impl Console {
         });
     }
 
+    /// Revoking trust removes the daemon's authorized-fingerprint
+    /// entry (design D15: guarded by a second confirmation).
+    fn confirm_revoke(&self, fingerprint: String, window: &mut Window, cx: &mut Context<Self>) {
+        let writer = self.writer.clone();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let fingerprint = fingerprint.clone();
+            let writer = writer.clone();
+            alert
+                .title("撤销信任？")
+                .description("该设备将无法再向本机发送键鼠事件，直至重新授权。")
+                .confirm()
+                .ok_text("撤销信任")
+                .cancel_text("取消")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, _, _| {
+                    if let Some(writer) = &writer {
+                        writer.send(FrontendRequest::RemoveAuthorizedKey(fingerprint.clone()));
+                    }
+                    true
+                })
+        });
+    }
+
     /// Re-dial an offline device from the detail panel — the same
     /// direct-connect the search box issues.
     fn connect_selected(&mut self, cx: &mut Context<Self>) {
@@ -554,6 +627,9 @@ impl Console {
         let handle = entry.handle;
         self.request(FrontendRequest::ConnectTo(ip, port));
         self.pending_connect = Some(ip);
+        self.retrying = Some((ip, port));
+        self.retry_attempts = 1;
+        self.spawn_connect_retries(cx);
         self.selected = Some(handle);
         self.notify_now(Notification::info(format!("正在连接 {ip}:{port}…")), cx);
         cx.notify();

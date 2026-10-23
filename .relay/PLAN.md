@@ -16,9 +16,8 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
 ## 当前焦点
-- 当前里程碑：**M2b 实现**。**增量二已完成（2026-10-23，Xvfb 交互冒烟全绿）**：搜索直连（新 `FrontendRequest::ConnectTo(IpAddr, u16)`：复用/新建客户端 + 激活 + Ping 踢立即拨号，回车触发、成功自动选中、失败以列表离线呈现）+ 设备详情完整化（概览 kv 含对端版本/往返延迟，连接/修改配置/移除+AlertDialog 二次确认/远程查看占位）+ 编辑表单（hostname/地址/端口 + 位置与连接方式芯片选择，逐字段差异下发 Update* 请求）+ 列表实时徽标（在线/连接中/离线 + 反向外呼芯片，离线置灰可选中）。console 拆分为 `console/{mod,detail}.rs`。**增量三**：认证流 UI（D15：ConnectionAttempt 授权请求对话框 + 安全区重置指纹二次确认 + IncomingPeerConfig 展示）→ 设置浮层 → 交互式布局画布（拖拽自研）→ 调试日志栏。
+- 当前里程碑：**M2b 实现**。**增量二（969a882）与增量三核心（本次提交）完成**：授权流 UI 已验证——ConnectionAttempt 授权对话框（指纹核对 + 备注输入 + 拒绝/允许，10s 冷却防重弹）、详情信任区块（已信任/备注/最近地址/指纹 + 撤销信任二次确认）、`ClientState.peer_fingerprint` 出站客户端↔指纹关联（入站 Connected 按源地址匹配）、直连重试循环（对端授权后自动重连上线；A 侧截图验证：在线徽标/对端版本/延迟 0.6ms/信任区块全要素）。**待办**：① B 侧信任区块时序（client 创建晚于对端入站时拿不到指纹——可在 authorized 更新时按 last_addr 反查刷新）；② 「连接中/待认证」中间态徽标；③ 访问密码协议小设计稿（公子确认后实现）。之后：设置浮层 → 交互式布局画布（拖拽自研）→ 调试日志栏。
 - 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。设计稿：/home/zero/.zcode/v2/visualizations/3d252e463bc1b58d89f0863df626aae944882a3148442cbafe958cd4e62fbe9a/mousehop-console-v2.html
-- 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。
 
 ## 决策与死路（追加式）
 - 2026-10-22 初始化计划。
@@ -45,7 +44,7 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-23 [D17·M2b 组件选型落地] 控制端 crate `mousehop-console` 依赖 **gpui-kit 0.8.0 单一入口**（组件层 gpui-component 0.8.0、底座 gpui-pre =0.3.9、资产层 gpui-kit-assets 全量 1829 图标 Lucide 目录——`gpui_kit::assets::IconName`；component::IconName 只是兼容子集）。**ely 暂缓引入**：ely-gpui-component 0.1.1 无 crates.io 发布、仅本地 checkout，path 依赖破坏工作区可复现性；设计稿 v2.2 全部控件 gpui-kit 已覆盖（TitleBar/StatusBar/Input/Button/Switch/Dialog/Notification/Tabs/Empty），ely 需要时走 git 依赖并先以 compat/kit 证明共存。D7 前置已通过：compat/kit 示例构建 1m28s + Xvfb 运行 + 截图验证（ely 与 gpui-kit 同窗渲染正常）。布局拖拽仍需自研（D7 结论不变，ely 未实装拖拽原语）。
 - 2026-10-23 [D18·增量二语义] `FrontendRequest::ConnectTo(IpAddr, u16)`：目标 IP 已存在于任一客户端候选集则复用（不建重复项），否则**新建持久客户端**（HANDOFF-006 曾设想「临时客户端」，实现取持久——与设备列表产品语义一致）；随后激活（可能挤占同位置的原激活客户端，KVM 每边一台的既有语义）并 `conn.send(Ping)` 立即拨号（Direct 模式原为懒拨号，显式直连须即时反馈）。拨号失败不产生独立错误事件——客户端以离线态呈现在列表（与懒拨号路径一致），认证流增量再补「连接中/待认证」中间态。
 - 2026-10-23 [事实·gpui-kit 0.8.0 API 增补] 订阅回调（`cx.subscribe`）无 `&mut Window`：Console 存 `AnyWindowHandle`（`window.window_handle()`，Copy），经 `handle.update(cx, |_, window, cx|)` 弹 Notification / 改 InputState（`set_value` 需 window）；`AnyWindowHandle::update` 接受 `C: AppContext`（`Context<T>` 满足）。`InputEvent::PressEnter { secondary, shift }`。AlertDialog 由 `WindowExt::open_alert_dialog(cx, build)` 打开，build 闭包是 `Fn`——捕获变量须在内部 clone 后再 move 进 on_ok；默认 Cancel 文案是英文，需 `.cancel_text("取消")`。`overflow_y_scroll` 在 `StatefulInteractiveElement`（非 Styled）。图标无 `Trash2`，用 `Trash`。daemon(`--no-default-features`) 与 console 同 cargo 调用构建会因 ashpd 的 async-io/tokio 特性互斥而失败——**分开构建**。
-
+- 2026-10-23 [D19·增量三认证流] ① `ClientState.peer_fingerprint`（serde default，IPC 前向兼容）在 daemon 的 `EmulationEvent::Connected`（入站）按源地址 `get_client` 匹配回写出站客户端，console 信任区块以「指纹 ∈ authorized 表」为准渲染。② 授权对话框由 ConnectionAttempt 事件驱动，`has_active_dialog` 守卫 + 每指纹 10s 冷却（防握手重试轰炸）；备注输入是 Console 常驻 `auth_desc` 实体（对话框打开处无 window，无法现建）。③ 直连重试与自动选中必须分离：`Created` 事件先于拨号结果到达，若以「选中完成」终止重试则永远只拨一次——重试以目标 IP 对应客户端 `alive` 为终止条件（10 次 × 3s），对端授权后自动补连。④ 已知限制：client 创建晚于对端入站时拿不到 peer_fingerprint（B 侧信任区块不显示）；Xvfb :96 上对话框按钮鼠标点击不响应（:97 正常；键盘 Enter 可确认）——自动化冒烟优先用键盘。
 ## 接力索引
 - 会话账本：`.relay/state.json`
 - 交接文档：`.relay/journal/HANDOFF-*.md`（以最新为准）

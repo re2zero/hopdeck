@@ -865,6 +865,16 @@ impl Service {
                 if let Some(recovery) = self.remote_host_states.get_mut(&fingerprint) {
                     recovery.addr = addr;
                 }
+                // Link the inbound session back to the configured
+                // client so frontends can show its trust state inline.
+                if let Some(handle) = self.client_manager.get_client(addr) {
+                    if self
+                        .client_manager
+                        .set_peer_fingerprint(handle, Some(fingerprint.clone()))
+                    {
+                        self.broadcast_client(handle);
+                    }
+                }
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
                 self.maybe_adopt_reverse_session(addr, session).await;
             }

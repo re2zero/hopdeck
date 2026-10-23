@@ -319,6 +319,19 @@ impl ClientManager {
         }
     }
 
+    /// Record the fingerprint of the peer's most recent inbound
+    /// session for this client. Returns `true` when the value changed,
+    /// so callers only re-broadcast on real moves.
+    pub(crate) fn set_peer_fingerprint(&self, handle: ClientHandle, fp: Option<String>) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((_, s)) if s.peer_fingerprint != fp => {
+                s.peer_fingerprint = fp;
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn active_addr(&self, handle: ClientHandle) -> Option<SocketAddr> {
         self.clients
             .borrow()

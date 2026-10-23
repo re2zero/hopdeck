@@ -1,11 +1,11 @@
 //! Console window: device list, device detail and the status bar.
 //!
 //! The frame is the fixed-height shell (design D16) fed by live daemon
-//! state. Increment 2 adds search direct-connect (`FrontendRequest::
-//! ConnectTo`), the editable device detail and live list badges. The
-//! auth flow, the settings overlay and the interactive layout canvas
-//! land in later increments; their surfaces are placeholders so the
-//! frame stays stable.
+//! state. Increment 2 added search direct-connect, the editable device
+//! detail and live list badges; increment 3 adds the authorization
+//! flow (connection-attempt dialog, inline trust state). The settings
+//! overlay and the interactive layout canvas land in later increments;
+//! their surfaces are placeholders so the frame stays stable.
 
 mod detail;
 
@@ -29,8 +29,9 @@ use gpui_kit::{
 };
 use mousehop_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectMode, DEFAULT_PORT, FrontendEvent,
-    FrontendRequest, Position, Status,
+    FrontendRequest, IncomingPeerConfig, Position, Status,
 };
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 /// The whole console window state. Device data is the daemon's mirror:
@@ -43,8 +44,28 @@ pub struct Console {
     /// Direct-connect in flight: the IP whose `Created`/`State` event
     /// should be auto-selected (and stop filtering the list).
     pending_connect: Option<IpAddr>,
+    /// Direct-connect retry in flight. `Created` for a new client
+    /// arrives before the dial succeeds, so auto-select (see
+    /// `pending_connect`) cannot drive this: a denied or unreachable
+    /// peer never emits an event at all, and after the daemon's dial
+    /// backoff goes quiet nothing would re-kick the lazy dial — e.g.
+    /// the peer authorizing us a few seconds later.
+    retrying: Option<(IpAddr, u16)>,
+    retry_attempts: u32,
+    /// A background re-kick task is running for the retry target.
+    retry_loop_running: bool,
+    /// Last connection-attempt dialog per fingerprint, so handshake
+    /// retries while the user is deciding (or just declined) don't
+    /// re-open the dialog every couple of seconds.
+    last_auth_prompt: Option<(String, std::time::Instant)>,
     /// Edit form for the selected device; `None` outside edit mode.
     edit: Option<EditDraft>,
+    /// Mirror of the daemon's `authorized_fingerprints`.
+    authorized: HashMap<String, IncomingPeerConfig>,
+    /// Reusable description input for the authorization dialog (the
+    /// dialog is opened from window-less contexts, so the input lives
+    /// on the console).
+    auth_desc: Entity<InputState>,
     port: u16,
     port_error: Option<SharedString>,
     capture: Status,
@@ -173,6 +194,9 @@ impl Console {
         })
         .detach();
 
+        let auth_desc =
+            cx.new(|cx| InputState::new(window, cx).placeholder("备注名，如 书房笔记本"));
+
         let self_hostname = hostname::get()
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "本机".to_string());
@@ -183,7 +207,13 @@ impl Console {
             clients: Vec::new(),
             selected: None,
             pending_connect: None,
+            retrying: None,
+            retry_attempts: 0,
+            retry_loop_running: false,
+            last_auth_prompt: None,
             edit: None,
+            authorized: HashMap::new(),
+            auth_desc,
             port: 0,
             port_error: None,
             capture: Status::default(),
@@ -209,6 +239,8 @@ impl Console {
                 self.selected = None;
                 self.edit = None;
                 self.pending_connect = None;
+                self.retrying = None;
+                self.authorized.clear();
             }
             FeedEvent::Daemon(event) => self.apply_daemon_event(*event, cx),
         }
@@ -255,9 +287,65 @@ impl Console {
             }
             FrontendEvent::CaptureStatus(status) => self.capture = status,
             FrontendEvent::EmulationStatus(status) => self.emulation = status,
+            FrontendEvent::AuthorizedUpdated(keys) => self.authorized = keys,
+            FrontendEvent::ConnectionAttempt { fingerprint } => {
+                self.prompt_authorization(fingerprint, cx)
+            }
             _ => {}
         }
         cx.notify();
+    }
+
+    /// An unauthorized device knocked (DTLS handshake reached the
+    /// daemon): ask the user once per dialog lifetime. Retried
+    /// handshake attempts while the dialog is up are dropped.
+    fn prompt_authorization(&mut self, fingerprint: String, cx: &mut Context<Self>) {
+        const AUTH_PROMPT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+        if self.authorized.contains_key(&fingerprint) || self.writer.is_none() {
+            return;
+        }
+        if matches!(&self.last_auth_prompt, Some((fp, at)) if *fp == fingerprint && at.elapsed() < AUTH_PROMPT_COOLDOWN)
+        {
+            return;
+        }
+        self.last_auth_prompt = Some((fingerprint.clone(), std::time::Instant::now()));
+        let writer = self.writer.clone();
+        let input = self.auth_desc.clone();
+        let window = self.window;
+        let _ = window.update(cx, move |_, window, cx| {
+            if window.has_active_dialog(cx) {
+                return;
+            }
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let fingerprint = fingerprint.clone();
+                let writer = writer.clone();
+                let input = input.clone();
+                alert
+                    .title("远程设备请求连接")
+                    .description(format!(
+                        "指纹 {}。确认后该设备可向本机发送键鼠事件；指纹仅在此次核对。",
+                        short_fingerprint(&fingerprint)
+                    ))
+                    .child(Input::new(&input).small())
+                    .confirm()
+                    .ok_text("允许连接")
+                    .cancel_text("拒绝")
+                    .on_ok(move |_, _, cx| {
+                        let desc = input.read(cx).value().trim().to_string();
+                        let desc = if desc.is_empty() {
+                            "已授权设备".to_string()
+                        } else {
+                            desc
+                        };
+                        if let Some(writer) = &writer {
+                            writer.send(FrontendRequest::AuthorizeKey(desc, fingerprint.clone()));
+                        }
+                        true
+                    })
+                    .on_cancel(|_, _, _| true)
+            });
+        });
     }
 
     /// Auto-select the device a direct-connect was sent to, so the new
@@ -270,6 +358,8 @@ impl Console {
             entry.config.fix_ips.contains(&ip) || entry.state.ips.contains(&ip)
         });
         if hit {
+            // Selection settles immediately; dial retries keep going
+            // (`retrying`) until the device reports alive.
             self.pending_connect = None;
             self.selected = Some(handle);
             self.clear_search(cx);
@@ -345,12 +435,56 @@ impl Console {
         }
         self.request(FrontendRequest::ConnectTo(ip, port));
         self.pending_connect = Some(ip);
+        self.retrying = Some((ip, port));
+        self.retry_attempts = 1;
+        self.spawn_connect_retries(cx);
         self.notify_now(
             Notification::info(format!("正在向 {ip}:{port} 发起连接请求，等待对方确认…")),
             cx,
         );
         self.clear_search(cx);
         cx.notify();
+    }
+
+    /// Re-send `ConnectTo` every few seconds until the target device
+    /// reports alive (or the attempt budget runs out). A denied or
+    /// unreachable peer never emits an event, so after the daemon's
+    /// dial backoff goes quiet nothing would otherwise retry —
+    /// including the case where the peer authorizes us seconds later.
+    fn spawn_connect_retries(&mut self, cx: &mut Context<Self>) {
+        if self.retry_loop_running {
+            return;
+        }
+        self.retry_loop_running = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                let Ok(retry) = this.update(cx, |this, _| {
+                    let Some((ip, port)) = this.retrying else {
+                        this.retry_loop_running = false;
+                        return false;
+                    };
+                    let alive = ip_alive(this.clients.iter(), ip);
+                    if alive || this.retry_attempts >= 10 {
+                        this.retrying = None;
+                        this.retry_attempts = 0;
+                        this.retry_loop_running = false;
+                        return false;
+                    }
+                    this.retry_attempts += 1;
+                    this.request(FrontendRequest::ConnectTo(ip, port));
+                    true
+                }) else {
+                    return;
+                };
+                if !retry {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     fn feed_label(&self) -> SharedString {
@@ -645,8 +779,21 @@ fn chip(label: &'static str, bg: Hsla, fg: Hsla) -> Div {
         .child(label.to_string())
 }
 
+/// Whether any configured client listing `ip` is currently alive.
+fn ip_alive<'a>(clients: impl Iterator<Item = &'a DeviceEntry>, ip: IpAddr) -> bool {
+    clients
+        .filter(|entry| entry.config.fix_ips.contains(&ip) || entry.state.ips.contains(&ip))
+        .any(|entry| entry.online())
+}
+
 fn presence_dot(color: Hsla) -> Div {
     div().size_2().rounded_full().bg(color).flex_shrink_0()
+}
+
+/// First byte groups of a colon-hex fingerprint, for dialog copy where
+/// the full string would overwhelm the layout.
+fn short_fingerprint(fp: &str) -> &str {
+    fp.get(..20).unwrap_or(fp)
 }
 
 /// Parse a direct-connect query: a bare IP, or an `ip:port` pair
