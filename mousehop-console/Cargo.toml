@@ -1,0 +1,14 @@
+[package]
+name = "mousehop-console"
+description = "GPUI control console frontend for mousehop"
+version.workspace = true
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jondkinney/mousehop"
+
+[dependencies]
+futures = "0.3.28"
+gpui-kit = "0.8.0"
+hostname = "0.4.0"
+log = "0.4.20"
+mousehop-ipc = { workspace = true }

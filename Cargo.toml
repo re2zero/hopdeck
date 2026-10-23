@@ -5,6 +5,7 @@ members = [
     "input-emulation",
     "input-event",
     "mousehop",
+    "mousehop-console",
     "mousehop-ipc",
     "mousehop-cli",
     "mousehop-gtk",
@@ -21,6 +22,7 @@ input-emulation = { package = "mousehop-input-emulation", path = "input-emulatio
 mousehop-proto = { path = "mousehop-proto", version = "0.17.1" }
 mousehop-ipc = { path = "mousehop-ipc", version = "0.17.1" }
 mousehop-cli = { path = "mousehop-cli", version = "0.17.1" }
+mousehop-console = { path = "mousehop-console", version = "0.17.1" }
 mousehop-gtk = { path = "mousehop-gtk", version = "0.17.1" }
 
 [profile.release]

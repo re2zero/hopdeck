@@ -10,13 +10,13 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 ## 里程碑
 - [ ] M1 USB/IP 注入后端 PoC（分支 `feat/usbip-emulation`）—— 验收：QEMU 接收端注入键盘+鼠标成功；真机 Wayland（GNOME 45+/KDE 6.1+）与 X11 交叉验证；关闭 libei portal 后注入仍生效；`scripts/usbip-receiver-setup.sh`（vhci-hcd 加载 + loopback attach）交付；`cargo test -p input-emulation` 与 `cargo clippy --workspace` 通过。
 - [x] M2a 连接层功能（2026-10-23 拆分；用户指示功能优先）—— 验收：ClientConfig 支持连接方式（直连 / 反向外呼 / 转发端口地址），daemon 拨号方向按配置执行；反向外呼场景两机可经单侧发起建立会话；`mousehop-cli` 可配置与验证；mousehop-proto 无变更。（增量一 e6d973b：ConnectMode 全链路 + 反向拨号/保活 + CLI；增量二 = M2a-ii：控制输入流走反向隧道，双实例 E2E 注入验证通过，见 journal/M2a-REPORT.md）
-- [ ] M2b GPUI 控制端 UI（**挂起：等用户查看确认设计稿后再开始**）—— 验收：GPUI 应用（gpui-pre 0.3.9 + gpui-kit/ely 组件）完成设备添加与发现（自动扫描 / 手动 / 反向外呼三路径）+ 拖拽布局 + per-device 连接方式 + 发起一控多会话；接收端在 libei ↔ USB-IP 间切换后键鼠共享正常；GPUI 前端崩溃不影响 daemon；USB-IP 选项带「需要接收端配置」显式提示与可操作指引。开工前置：跑通 `Ely-GPUI-Components/compat/kit` 示例。
+- [ ] M2b GPUI 控制端 UI（设计稿 v2.2 已获公子确认，2026-10-23 启动实现）—— 验收：GPUI 应用（gpui-pre 0.3.9 + gpui-kit/ely 组件）完成设备添加与发现（自动扫描 / 手动 / 反向外呼三路径）+ 拖拽布局 + per-device 连接方式 + 发起一控多会话；接收端在 libei ↔ USB-IP 间切换后键鼠共享正常；GPUI 前端崩溃不影响 daemon；USB-IP 选项带「需要接收端配置」显式提示与可操作指引。开工前置：跑通 `Ely-GPUI-Components/compat/kit` 示例。
 - [ ] M3a 画面链路（可选，feature `video`，ely `RenderSurface` 显示）—— 验收：采集（PipeWire portal / DXGI）→ 硬编 → 独立通道 → 硬解 → RenderSurface 全链路可用，LAN 1080p 端到端 <150 ms；画面开关关闭后键鼠共享延迟与 CPU 占用对比 M2 基线无显著退化。
 - [ ] M3b 零拷贝渲染进程（可选进阶）—— 验收：独立 `mousehop-view` 进程（bite-gpui ^1.25 + gpui_interop 0.2.0）以 DMA-BUF/共享纹理导入显示，渲染路径无 CPU 像素拷贝；渲染进程崩溃不阻断键鼠与控制台。
 - 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
 ## 当前焦点
-- 当前里程碑：**M2b 设计稿 v2**。2026-10-23 公子查看 v1 设计稿后否决（「不成熟、拿不出手」），给出全新产品形态需求（见 D14）。本轮交付 v2 设计稿（HTML 交互稿）再过目；**确认前仍严禁写 GPUI 实现代码**。M2b 实现开工前置不变：跑通 `Ely-GPUI-Components/compat/kit` 示例。**M3 严禁在 M2b 确认前开工。**
+- 当前里程碑：**M2b 实现**（v2.2 设计稿 2026-10-23 获公子确认，D17 组件选型落地）。**增量一已完成**：`mousehop-console` crate（gpui-kit 0.8.0）+ daemon IPC 接线 + 定高 780 窗口骨架（TitleBar / 左列搜索+设备列表+本机栏 / 右列详情+布局占位条 / 状态栏），双进程 Xvfb 冒烟通过（列表与状态栏均为真实 daemon 数据）。**增量二**：设备详情完整化（操作按钮启用）+ 搜索直连（新 `FrontendRequest` 变体：向任意 IP 发起连接请求）+ 列表实时状态徽标。随后：认证流 UI（D15）→ 设置浮层 → 交互式布局画布（拖拽自研）→ 调试日志栏。访问密码认证协议实现前另出小设计稿；云端仅占位入口。设计稿：/home/zero/.zcode/v2/visualizations/3d252e463bc1b58d89f0863df626aae944882a3148442cbafe958cd4e62fbe9a/mousehop-console-v2.html
 - 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。
 
 ## 决策与死路（追加式）
@@ -41,6 +41,7 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-23 [D14·M2b 设计 v1 否决] 公子否决 v1 设计稿（不成熟、拿不出手），新产品形态需求：① 单一主界面 + 设置按钮（配置界面从设置进入）；② 设备列表上方搜索框可输入任意 IP，回车时目标不在列表则直接向该 IP 发起连接请求——覆盖跨网段不可发现与单向网络（reverse）场景；③ 设备列表与设备详情并排两列一行（左列表右详情）；④ 屏幕布局编辑收为下方一行、可折叠；⑤ 点击设备项展示详情与操作（修改配置、重置指纹、远程查看等）；⑥ 左下角为本机设备 + 设置按钮；⑦ 底部状态栏，开启调试日志后底部追加日志栏；⑧ 为云端远程控制预留（头脑风暴方向：云中继接入、设备码直连、远程查看/反控、LAN/云设备分组徽标）。v1 稿存档：/home/zero/.zcode/v2/visualizations/97edd8bc06635e4af0dc6710e96b262848aa423f5b02ef52c79aa28b460977e9/mousehop-console-design.html
 - 2026-10-23 [D15·v2 设计迭代] 公子对 v2 反馈两条：① 认证流重做——「复制指纹」无意义（不应要求手动填指纹到其它机器），改为远程控制式认证：能连通即发认证请求，支持**对方确认**与**访问密码**两种方式，指纹仅在首次确认时核对一次、此后自动信任；「重置指纹」移入安全区并强制二次确认（防误触）。② 布局区从底部通栏移到**右栏设备详情下方**（详情内容少时填补空旷），并支持**从列表拖拽设备到布局画布**放置（取消「未布置」区）。→ v2.1 稿。实现备注：认证请求/密码对应 proto 已有能力（Hello/授权表），「访问密码」为新需求（被控端设置 + 连接握手附加认证，实现期待设计）；「撤销信任」= 移除 authorized_fingerprints 条目。
 - 2026-10-23 [D16·v2.1 设计迭代] 公子认可 v2.1（「不错」）并提细节两条：① **窗口高度不随内容变化**（编辑模式切换等场景不再「秃噜」）——定高 780px，详情区内部滚动；共享选项改**卡片式布局**（剪贴板/自然滚动/灵敏度三卡，紧凑）。② 布局画布支持**「下」屏并扩展多屏**：左/右/下各 1 槽 + 上排最多 3 槽（合计 6），离线设备可预布局（半透明+离线标注），容量满后拖入槽自动消失、占用槽拒绝重复放置并 toast 提示。→ v2.2 稿（同路径覆盖）。
+- 2026-10-23 [D17·M2b 组件选型落地] 控制端 crate `mousehop-console` 依赖 **gpui-kit 0.8.0 单一入口**（组件层 gpui-component 0.8.0、底座 gpui-pre =0.3.9、资产层 gpui-kit-assets 全量 1829 图标 Lucide 目录——`gpui_kit::assets::IconName`；component::IconName 只是兼容子集）。**ely 暂缓引入**：ely-gpui-component 0.1.1 无 crates.io 发布、仅本地 checkout，path 依赖破坏工作区可复现性；设计稿 v2.2 全部控件 gpui-kit 已覆盖（TitleBar/StatusBar/Input/Button/Switch/Dialog/Notification/Tabs/Empty），ely 需要时走 git 依赖并先以 compat/kit 证明共存。D7 前置已通过：compat/kit 示例构建 1m28s + Xvfb 运行 + 截图验证（ely 与 gpui-kit 同窗渲染正常）。布局拖拽仍需自研（D7 结论不变，ely 未实装拖拽原语）。
 
 ## 接力索引
 - 会话账本：`.relay/state.json`
