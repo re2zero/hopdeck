@@ -16,7 +16,7 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
 ## 当前焦点
-- **M2a 全部完成（含 M2a-ii，2026-10-23）**。已按计划停止自动排程：下一步是 **M2b（GPUI 控制端 UI），挂起中——等用户查看并确认设计稿后再开工**（设计稿：/home/zero/.zcode/v2/visualizations/97edd8bc06635e4af0dc6710e96b262848aa423f5b02ef52c79aa28b460977e9/mousehop-console-design.html）。M2b 开工前置：跑通 `Ely-GPUI-Components/compat/kit` 示例。**M3 严禁在 M2b 确认前开工。**
+- 当前里程碑：**M2b 设计稿 v2**。2026-10-23 公子查看 v1 设计稿后否决（「不成熟、拿不出手」），给出全新产品形态需求（见 D14）。本轮交付 v2 设计稿（HTML 交互稿）再过目；**确认前仍严禁写 GPUI 实现代码**。M2b 实现开工前置不变：跑通 `Ely-GPUI-Components/compat/kit` 示例。**M3 严禁在 M2b 确认前开工。**
 - 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。
 
 ## 决策与死路（追加式）
@@ -38,6 +38,7 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-23 [D12·bug 修复] accept 时 spawn 的 `hello_watchdog` 持 conn 引用，take_conn 收养后 12s 必杀已收养连接（T+12 掉线）——修复为关闭前校验 `accepted_connection_is_current`，已离开 listener 连接表的会话其孤儿 watchdog 退避。同时确认：僵尸 read_loop 收养后至多吃一个数据报即自退且不发布 Disconnected（现有 stale 守卫），Hello 重传预算（8×750ms）覆盖该一次性丢包。
 - 2026-10-23 [D13·已知限制] 反向隧道对输入是单向的：被控端可经隧道接收注入，但其控制端反向（B 控制 A）需反向拨号的会话，M2b/M3 前不做（README Connection Modes 已注明）。forward_log：capture 侧 conn2 类冗余连接（双方互标 reverse 且双向可达时）由 ping 无应答在 ~2s 内自清理，无需专门处理。
 - 2026-10-23 [事实·E2E 方法] 本机 X11 capture 是未实现 stub，`--capture-backend dummy` 是唯一 capture 路径；dummy 的 Begin 每后端实例仅一次，竞速 B 的 5s 拨号不可靠——在 `input-capture/src/dummy.rs` 加 `MOUSEHOP_DUMMY_CAPTURE_DELAY_MS`（默认 0，行为不变）使 Begin 可在隧道建立后确定性触发。E2E = Xvfb :93(A，dummy capture) / :94(B，X11 emulation 注入)，`xdotool getmouselocation` 持续变化即注入成功。
+- 2026-10-23 [D14·M2b 设计 v1 否决] 公子否决 v1 设计稿（不成熟、拿不出手），新产品形态需求：① 单一主界面 + 设置按钮（配置界面从设置进入）；② 设备列表上方搜索框可输入任意 IP，回车时目标不在列表则直接向该 IP 发起连接请求——覆盖跨网段不可发现与单向网络（reverse）场景；③ 设备列表与设备详情并排两列一行（左列表右详情）；④ 屏幕布局编辑收为下方一行、可折叠；⑤ 点击设备项展示详情与操作（修改配置、重置指纹、远程查看等）；⑥ 左下角为本机设备 + 设置按钮；⑦ 底部状态栏，开启调试日志后底部追加日志栏；⑧ 为云端远程控制预留（头脑风暴方向：云中继接入、设备码直连、远程查看/反控、LAN/云设备分组徽标）。v1 稿存档：/home/zero/.zcode/v2/visualizations/97edd8bc06635e4af0dc6710e96b262848aa423f5b02ef52c79aa28b460977e9/mousehop-console-design.html
 
 ## 接力索引
 - 会话账本：`.relay/state.json`
