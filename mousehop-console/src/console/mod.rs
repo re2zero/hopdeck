@@ -58,6 +58,12 @@ pub struct Console {
     /// retries while the user is deciding (or just declined) don't
     /// re-open the dialog every couple of seconds.
     last_auth_prompt: Option<(String, std::time::Instant)>,
+    /// Fingerprints parked at the daemon's authorization gate, with
+    /// the most recent knock time (design D15's 待认证 state). The
+    /// daemon re-fires `ConnectionAttempt` while the peer retries, so
+    /// stale entries simply age out instead of needing a dedicated
+    /// "knocker gave up" signal.
+    awaiting_auth: HashMap<String, std::time::Instant>,
     /// Edit form for the selected device; `None` outside edit mode.
     edit: Option<EditDraft>,
     /// Mirror of the daemon's `authorized_fingerprints`.
@@ -82,6 +88,12 @@ enum FeedState {
     Connected,
     Disconnected(Option<SharedString>),
 }
+
+/// Knocks older than this are stale: the peer stopped retrying (gave
+/// up, or the dialog was declined), so the badge falls back to
+/// offline. The daemon re-fires every ~2s while a peer is retrying,
+/// giving live knocks ample headroom.
+const AUTH_KNOCK_TTL: std::time::Duration = std::time::Duration::from_secs(12);
 
 #[derive(Clone)]
 struct DeviceEntry {
@@ -211,6 +223,7 @@ impl Console {
             retry_attempts: 0,
             retry_loop_running: false,
             last_auth_prompt: None,
+            awaiting_auth: HashMap::new(),
             edit: None,
             authorized: HashMap::new(),
             auth_desc,
@@ -241,6 +254,7 @@ impl Console {
                 self.pending_connect = None;
                 self.retrying = None;
                 self.authorized.clear();
+                self.awaiting_auth.clear();
             }
             FeedEvent::Daemon(event) => self.apply_daemon_event(*event, cx),
         }
@@ -287,9 +301,19 @@ impl Console {
             }
             FrontendEvent::CaptureStatus(status) => self.capture = status,
             FrontendEvent::EmulationStatus(status) => self.emulation = status,
-            FrontendEvent::AuthorizedUpdated(keys) => self.authorized = keys,
+            FrontendEvent::AuthorizedUpdated(keys) => {
+                // Once authorized the peer is past the gate; the badge
+                // reverts to connecting/offline until it dials through.
+                self.awaiting_auth.retain(|fp, _| !keys.contains_key(fp));
+                self.authorized = keys;
+            }
             FrontendEvent::ConnectionAttempt { fingerprint } => {
+                self.awaiting_auth
+                    .insert(fingerprint.clone(), std::time::Instant::now());
                 self.prompt_authorization(fingerprint, cx)
+            }
+            FrontendEvent::DeviceConnected { fingerprint, .. } => {
+                self.awaiting_auth.remove(&fingerprint);
             }
             _ => {}
         }
@@ -630,17 +654,47 @@ impl Console {
             .child(self.render_row_chips(entry, cx))
     }
 
-    /// Right-aligned status chips: online/offline plus the reverse
+    /// Row/header status chip: online, then parked at the local
+    /// authorization gate, then dialing (DNS or the direct-connect
+    /// retry loop), then offline.
+    fn status_chip(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> (&'static str, Hsla) {
+        if entry.online() {
+            ("在线", cx.theme().success)
+        } else if self.awaiting_authorization(entry) {
+            ("待认证", cx.theme().warning)
+        } else if entry.state.resolving || self.dial_in_flight(entry) {
+            ("连接中", cx.theme().muted_foreground)
+        } else {
+            ("离线", cx.theme().muted_foreground)
+        }
+    }
+
+    /// The device's fingerprint is waiting at the daemon's
+    /// authorization gate: it knocked (`ConnectionAttempt`) but the
+    /// user has not allowed it yet. The initiator side has no protocol
+    /// signal for this — its own row only ever shows 连接中.
+    fn awaiting_authorization(&self, entry: &DeviceEntry) -> bool {
+        entry
+            .state
+            .peer_fingerprint
+            .as_deref()
+            .is_some_and(|fp| self.awaiting_auth.contains_key(fp))
+    }
+
+    /// The device is the target of the in-flight direct-connect retry
+    /// loop — the initiator's only "connecting" knowledge is its own
+    /// dials (a pending peer never emits an event).
+    fn dial_in_flight(&self, entry: &DeviceEntry) -> bool {
+        self.retrying.is_some_and(|(ip, _)| {
+            entry.config.fix_ips.contains(&ip) || entry.state.ips.contains(&ip)
+        })
+    }
+
+    /// Right-aligned status chips: connection state plus the reverse
     /// dial marker (direct stays unlabeled — it is the quiet default).
     fn render_row_chips(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
         let mut chips = h_flex().gap_1().flex_shrink_0();
-        let (label, tone) = if entry.state.resolving {
-            ("连接中", cx.theme().muted_foreground)
-        } else if entry.online() {
-            ("在线", cx.theme().success)
-        } else {
-            ("离线", cx.theme().muted_foreground)
-        };
+        let (label, tone) = self.status_chip(entry, cx);
         chips = chips.child(chip(label, tone.opacity(0.15), tone));
         if entry.config.connect_mode == ConnectMode::Reverse {
             chips = chips.child(chip(
@@ -815,6 +869,10 @@ fn parse_direct_address(query: &str) -> Option<(IpAddr, u16)> {
 
 impl Render for Console {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Expire authorization knocks the daemon stopped refreshing:
+        // the peer gave up or the dialog was declined.
+        self.awaiting_auth
+            .retain(|_, at| at.elapsed() < AUTH_KNOCK_TTL);
         let filter = self.search.read(cx).value().to_lowercase();
         let visible: Vec<DeviceEntry> = if filter.is_empty() {
             self.clients.clone()

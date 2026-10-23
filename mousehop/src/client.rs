@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     rc::Rc,
@@ -17,6 +17,13 @@ use crate::config::ConfigClient;
 #[derive(Clone, Default)]
 pub struct ClientManager {
     clients: Rc<RefCell<Slab<(ClientConfig, ClientState)>>>,
+    /// Set by the connect-side state mutators (`set_alive`,
+    /// `set_peer_commit`, ...) whose changes happen without any event
+    /// flowing toward the service. The service polls and clears this
+    /// flag to re-broadcast changed clients to frontends — the
+    /// alternative relay lives in the capture event loop, which is
+    /// dead whenever no capture backend is available.
+    client_states_dirty: Rc<Cell<bool>>,
 }
 
 impl ClientManager {
@@ -303,18 +310,27 @@ impl ClientManager {
 
     pub(crate) fn set_active_addr(&self, handle: ClientHandle, addr: Option<SocketAddr>) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
+            if s.active_addr != addr {
+                self.client_states_dirty.set(true);
+            }
             s.active_addr = addr;
         }
     }
 
     pub(crate) fn set_alive(&self, handle: ClientHandle, alive: bool) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
+            if s.alive != alive {
+                self.client_states_dirty.set(true);
+            }
             s.alive = alive;
         }
     }
 
     pub(crate) fn set_peer_commit(&self, handle: ClientHandle, commit: Option<[u8; 8]>) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
+            if s.peer_commit != commit {
+                self.client_states_dirty.set(true);
+            }
             s.peer_commit = commit;
         }
     }
@@ -326,10 +342,21 @@ impl ClientManager {
         match self.clients.borrow_mut().get_mut(handle as usize) {
             Some((_, s)) if s.peer_fingerprint != fp => {
                 s.peer_fingerprint = fp;
+                self.client_states_dirty.set(true);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Whether any connect-side state mutated since the last poll,
+    /// clearing the flag. The service re-broadcasts changed clients so
+    /// frontends observe alive/commit/latency moves that no event
+    /// announces (see the field docs).
+    pub(crate) fn take_client_states_dirty(&self) -> bool {
+        let dirty = self.client_states_dirty.get();
+        self.client_states_dirty.set(false);
+        dirty
     }
 
     pub(crate) fn active_addr(&self, handle: ClientHandle) -> Option<SocketAddr> {
@@ -628,6 +655,7 @@ impl ClientManager {
                 Some(prev) if *prev == rtt_micros => false,
                 _ => {
                     s.latencies.insert(ip, rtt_micros);
+                    self.client_states_dirty.set(true);
                     true
                 }
             },
@@ -679,6 +707,23 @@ mod tests {
     use super::*;
     use crate::config::ConfigClient;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn connect_side_mutations_mark_client_states_dirty() {
+        let cm = ClientManager::default();
+        let handle = cm.add_client();
+        assert!(!cm.take_client_states_dirty());
+        cm.set_alive(handle, true);
+        assert!(cm.take_client_states_dirty());
+        assert!(!cm.take_client_states_dirty());
+        // Same-value writes stay clean.
+        cm.set_alive(handle, true);
+        assert!(!cm.take_client_states_dirty());
+        cm.set_peer_commit(handle, Some(*b"deadbeef"));
+        assert!(cm.take_client_states_dirty());
+        cm.set_peer_fingerprint(handle, Some("fp".into()));
+        assert!(cm.take_client_states_dirty());
+    }
 
     fn ip(a: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, a))

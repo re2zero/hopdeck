@@ -367,6 +367,15 @@ impl Service {
         let mut reverse_dial_tick = tokio::time::interval(Duration::from_secs(5));
         reverse_dial_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Frontend state sync: the connect-side mutators (`set_alive`,
+        // `set_peer_commit`, latency samples) change client state with
+        // no event reaching the service — their relay lives in the
+        // capture loop, which is dead whenever no capture backend is
+        // available. Poll the dirty flag and re-broadcast changed
+        // clients so frontends never freeze on a stale snapshot.
+        let mut frontend_sync_tick = tokio::time::interval(Duration::from_secs(2));
+        frontend_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request).await,
@@ -381,6 +390,7 @@ impl Service {
                 _ = self.config.changed() => self.handle_config_change().await,
                 _ = discovery_refresh_tick.tick() => self.on_discovery_refresh().await,
                 _ = reverse_dial_tick.tick() => self.on_reverse_dial_tick().await,
+                _ = frontend_sync_tick.tick() => self.on_frontend_sync_tick(),
                 event = recv_clipboard(&mut self.clipboard_monitor) => {
                     self.handle_local_clipboard_event(event).await;
                 }
@@ -664,7 +674,56 @@ impl Service {
         // No need to push to InputEmulation — last_addr/last_hostname
         // are display-only; per-pair scroll/sensitivity is unaffected.
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(snapshot));
+        self.backfill_peer_fingerprints();
         self.save_config().await;
+    }
+
+    /// Link authorized-peer entries to configured clients whose
+    /// `peer_fingerprint` is still unset. The live association is
+    /// written by `Connected`, but that event can land before the
+    /// matching client exists (the peer dials in first, the user adds
+    /// the device afterwards) or while the client is inactive —
+    /// `ClientManager::get_client` only matches active clients. The
+    /// authorized entry's persisted `last_addr`, and its mDNS
+    /// hostname mapped through the discovery cache, survive both
+    /// orderings. Idempotent: unchanged clients are not re-broadcast.
+    fn backfill_peer_fingerprints(&mut self) {
+        let keys = self.authorized_keys.read().expect("lock").clone();
+        if keys.is_empty() {
+            return;
+        }
+        for (handle, config, state) in self.client_manager.get_client_states() {
+            if state.peer_fingerprint.is_some() {
+                continue;
+            }
+            let known_peer_ip = |peer: &IncomingPeerConfig| {
+                let by_addr = peer
+                    .last_addr
+                    .as_deref()
+                    .and_then(|addr| addr.parse::<IpAddr>().ok());
+                let by_hostname = peer
+                    .last_hostname
+                    .as_deref()
+                    .and_then(|host| self.primary_cache.borrow().get(host).copied());
+                [by_addr, by_hostname]
+                    .into_iter()
+                    .flatten()
+                    .any(|ip| config.fix_ips.contains(&ip) || state.ips.contains(&ip))
+            };
+            let fingerprint = keys
+                .iter()
+                .find(|(_, peer)| known_peer_ip(peer))
+                .map(|(fp, _)| fp.clone());
+            let Some(fingerprint) = fingerprint else {
+                continue;
+            };
+            if self
+                .client_manager
+                .set_peer_fingerprint(handle, Some(fingerprint))
+            {
+                self.broadcast_client(handle);
+            }
+        }
     }
 
     fn lookup_hostname_for_ip(&self, target: std::net::IpAddr) -> Option<String> {
@@ -1207,6 +1266,25 @@ impl Service {
         }
     }
 
+    /// Re-broadcast every registered client when the connect side
+    /// mutated state silently (Pong liveness, Hello commit, latency
+    /// samples — see `ClientManager::take_client_states_dirty`).
+    /// Idempotent snapshots: frontends dedupe by content.
+    fn on_frontend_sync_tick(&mut self) {
+        if !self.client_manager.take_client_states_dirty() {
+            return;
+        }
+        let handles: Vec<ClientHandle> = self
+            .client_manager
+            .get_client_states()
+            .into_iter()
+            .map(|(handle, _, _)| handle)
+            .collect();
+        for handle in handles {
+            self.broadcast_client(handle);
+        }
+    }
+
     /// Controller half of reverse-connect: an inbound DTLS session
     /// whose source matches a Reverse-mode client is that client's
     /// transport *to us* — take it away from the emulation side and
@@ -1273,6 +1351,10 @@ impl Service {
     }
 
     fn sync_frontend(&mut self) {
+        // Frontends connect after startup: reconcile any authorized
+        // peer recorded by a previous session against the clients
+        // loaded from config before the first enumeration.
+        self.backfill_peer_fingerprints();
         self.enumerate();
         self.notify_frontend(FrontendEvent::EmulationStatus(self.emulation_status));
         self.notify_frontend(FrontendEvent::CaptureStatus(self.capture_status));
@@ -1411,6 +1493,7 @@ impl Service {
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.emulation.set_incoming_peers(keys.clone());
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+        self.backfill_peer_fingerprints();
     }
 
     fn remove_authorized_key(&mut self, fp: String) {
@@ -1430,6 +1513,7 @@ impl Service {
         log::info!("added client {handle}");
         let (c, s) = self.client_manager.get_state(handle).unwrap();
         self.notify_frontend(FrontendEvent::Created(handle, c, s));
+        self.backfill_peer_fingerprints();
     }
 
     /// Console direct-connect (search box): reuse an existing client
@@ -1469,6 +1553,7 @@ impl Service {
                 handle
             }
         };
+        self.backfill_peer_fingerprints();
         self.activate_client(handle);
         if let Err(e) = self.conn.send(ProtoEvent::Ping, handle).await {
             // A failed dial leaves the client offline in the list; the
@@ -1560,6 +1645,10 @@ impl Service {
     fn update_fix_ips(&mut self, handle: ClientHandle, fix_ips: Vec<IpAddr>) {
         self.client_manager.set_fix_ips(handle, fix_ips);
         self.broadcast_client(handle);
+        // The edited-in address may be an authorized peer's last known
+        // address — link the trust record now rather than waiting for
+        // the next inbound session.
+        self.backfill_peer_fingerprints();
     }
 
     fn update_hostname(&mut self, handle: ClientHandle, hostname: Option<String>) {

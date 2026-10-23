@@ -91,13 +91,9 @@ impl Console {
                         h_flex()
                             .ml_auto()
                             .gap_1()
-                            .children({
-                                let (label, tone) = if online {
-                                    ("在线", cx.theme().success)
-                                } else {
-                                    ("离线", cx.theme().muted_foreground)
-                                };
-                                Some(super::chip(label, tone.opacity(0.15), tone))
+                            .child({
+                                let (label, tone) = self.status_chip(entry, cx);
+                                super::chip(label, tone.opacity(0.15), tone)
                             })
                             .when(entry.config.connect_mode == ConnectMode::Reverse, |row| {
                                 row.child(super::chip(
