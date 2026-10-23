@@ -1,29 +1,37 @@
 //! Console window: device list, device detail and the status bar.
 //!
-//! Increment 1 renders the fixed-height shell (design D16) fed by live
-//! daemon state. Search direct-connect, the auth flow, the settings
-//! overlay and the interactive layout canvas land in later increments;
-//! their surfaces are present as placeholders so the frame stays stable.
+//! The frame is the fixed-height shell (design D16) fed by live daemon
+//! state. Increment 2 adds search direct-connect (`FrontendRequest::
+//! ConnectTo`), the editable device detail and live list badges. The
+//! auth flow, the settings overlay and the interactive layout canvas
+//! land in later increments; their surfaces are placeholders so the
+//! frame stays stable.
+
+mod detail;
 
 use crate::ipc::{FeedEvent, RequestWriter};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    AnyElement, AppContext, ClickEvent, Context, Div, Entity, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    AnyElement, AnyWindowHandle, AppContext, ClickEvent, Context, Div, Entity, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Window,
     assets::IconName,
     component::{
-        ActiveTheme, Disableable, Icon, Sizable, TitleBar,
+        ActiveTheme, Disableable, Icon, Sizable, TitleBar, WindowExt,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
+        notification::Notification,
         status_bar::StatusBar,
         v_flex,
     },
     div,
 };
 use mousehop_ipc::{
-    ClientConfig, ClientHandle, ClientState, FrontendEvent, FrontendRequest, Position, Status,
+    ClientConfig, ClientHandle, ClientState, ConnectMode, DEFAULT_PORT, FrontendEvent,
+    FrontendRequest, Position, Status,
 };
+use std::net::IpAddr;
 
 /// The whole console window state. Device data is the daemon's mirror:
 /// every field here comes from a `FrontendEvent`.
@@ -32,12 +40,20 @@ pub struct Console {
     writer: Option<RequestWriter>,
     clients: Vec<DeviceEntry>,
     selected: Option<ClientHandle>,
+    /// Direct-connect in flight: the IP whose `Created`/`State` event
+    /// should be auto-selected (and stop filtering the list).
+    pending_connect: Option<IpAddr>,
+    /// Edit form for the selected device; `None` outside edit mode.
+    edit: Option<EditDraft>,
     port: u16,
     port_error: Option<SharedString>,
     capture: Status,
     emulation: Status,
     self_hostname: SharedString,
     search: Entity<InputState>,
+    /// Window access for notifications and input edits outside event
+    /// handlers (subscribe callbacks have no `&mut Window`).
+    window: AnyWindowHandle,
 }
 
 enum FeedState {
@@ -46,6 +62,7 @@ enum FeedState {
     Disconnected(Option<SharedString>),
 }
 
+#[derive(Clone)]
 struct DeviceEntry {
     handle: ClientHandle,
     config: ClientConfig,
@@ -81,27 +98,78 @@ impl DeviceEntry {
     }
 
     fn position_label(&self) -> &'static str {
-        match self.config.pos {
-            Position::Left => "左侧",
-            Position::Right => "右侧",
-            Position::Top => "上方",
-            Position::Bottom => "下方",
-        }
+        position_label(self.config.pos)
+    }
+
+    fn connect_mode_label(&self) -> &'static str {
+        connect_mode_label(self.config.connect_mode)
     }
 
     fn online(&self) -> bool {
         self.state.alive
     }
+
+    /// Whether the direct-connect query matches this device (hostname
+    /// or address substring), shared by list filtering and the
+    /// select-on-enter behavior.
+    fn matches(&self, filter: &str) -> bool {
+        self.config
+            .hostname
+            .as_deref()
+            .is_some_and(|h| h.to_lowercase().contains(filter))
+            || self.addr_label().to_lowercase().contains(filter)
+    }
+
+    /// The IP a "connect" action should dial: the first pinned address,
+    /// else any known candidate.
+    fn dial_ip(&self) -> Option<IpAddr> {
+        self.config
+            .fix_ips
+            .first()
+            .copied()
+            .or_else(|| self.state.ips.iter().next().copied())
+    }
+}
+
+fn position_label(pos: Position) -> &'static str {
+    match pos {
+        Position::Left => "左侧",
+        Position::Right => "右侧",
+        Position::Top => "上方",
+        Position::Bottom => "下方",
+    }
+}
+
+fn connect_mode_label(mode: ConnectMode) -> &'static str {
+    match mode {
+        ConnectMode::Direct => "直连",
+        ConnectMode::Reverse => "反向外呼",
+    }
+}
+
+/// The edit-form draft: input entities plus the two enum choices that
+/// render as chip buttons instead of text fields.
+struct EditDraft {
+    handle: ClientHandle,
+    device_name: SharedString,
+    hostname: Entity<InputState>,
+    ips: Entity<InputState>,
+    port: Entity<InputState>,
+    pos: Position,
+    connect_mode: ConnectMode,
 }
 
 impl Console {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索设备，或输入 IP 回车直连"));
-        cx.subscribe(&search, |_, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
+        cx.subscribe(&search, |this, search, event, cx| match event {
+            InputEvent::Change => cx.notify(),
+            InputEvent::PressEnter {
+                secondary: false,
+                shift: false,
+            } => this.connect_from_search(&search, cx),
+            _ => {}
         })
         .detach();
 
@@ -114,12 +182,15 @@ impl Console {
             writer: None,
             clients: Vec::new(),
             selected: None,
+            pending_connect: None,
+            edit: None,
             port: 0,
             port_error: None,
             capture: Status::default(),
             emulation: Status::default(),
             self_hostname: self_hostname.into(),
             search,
+            window: window.window_handle(),
         }
     }
 
@@ -136,6 +207,8 @@ impl Console {
                 self.writer = None;
                 self.clients.clear();
                 self.selected = None;
+                self.edit = None;
+                self.pending_connect = None;
             }
             FeedEvent::Daemon(event) => self.apply_daemon_event(*event, cx),
         }
@@ -154,17 +227,26 @@ impl Console {
             FrontendEvent::Created(handle, config, state) => {
                 self.clients.push(DeviceEntry::new(handle, config, state));
                 self.sort_clients();
+                self.settle_pending_connect(handle, cx);
             }
             FrontendEvent::State(handle, config, state) => {
                 if let Some(entry) = self.entry_mut(handle) {
                     entry.config = config;
                     entry.state = state;
+                } else {
+                    self.clients
+                        .push(DeviceEntry::new(handle, config, state.clone()));
+                    self.sort_clients();
                 }
+                self.settle_pending_connect(handle, cx);
             }
             FrontendEvent::Deleted(handle) => {
                 self.clients.retain(|entry| entry.handle != handle);
                 if self.selected == Some(handle) {
                     self.selected = None;
+                }
+                if self.edit.as_ref().is_some_and(|edit| edit.handle == handle) {
+                    self.edit = None;
                 }
             }
             FrontendEvent::PortChanged(port, error) => {
@@ -178,8 +260,32 @@ impl Console {
         cx.notify();
     }
 
+    /// Auto-select the device a direct-connect was sent to, so the new
+    /// entry is visible without hunting for it, and release the filter.
+    fn settle_pending_connect(&mut self, handle: ClientHandle, cx: &mut Context<Self>) {
+        let Some(ip) = self.pending_connect else {
+            return;
+        };
+        let hit = self.entry(handle).is_some_and(|entry| {
+            entry.config.fix_ips.contains(&ip) || entry.state.ips.contains(&ip)
+        });
+        if hit {
+            self.pending_connect = None;
+            self.selected = Some(handle);
+            self.clear_search(cx);
+        }
+    }
+
+    fn entry(&self, handle: ClientHandle) -> Option<&DeviceEntry> {
+        self.clients.iter().find(|entry| entry.handle == handle)
+    }
+
     fn entry_mut(&mut self, handle: ClientHandle) -> Option<&mut DeviceEntry> {
         self.clients.iter_mut().find(|entry| entry.handle == handle)
+    }
+
+    fn selected_entry(&self) -> Option<&DeviceEntry> {
+        self.selected.and_then(|handle| self.entry(handle))
     }
 
     fn sort_clients(&mut self) {
@@ -191,6 +297,60 @@ impl Console {
         if let Some(writer) = &self.writer {
             writer.send(request);
         }
+    }
+
+    /// Surface a toast even though subscribe/feed callbacks carry no
+    /// `&mut Window`.
+    fn notify_now(&self, note: Notification, cx: &mut Context<Self>) {
+        let _ = self.window.update(cx, |_, window, cx| {
+            window.push_notification(note, cx);
+        });
+    }
+
+    fn clear_search(&self, cx: &mut Context<Self>) {
+        let search = self.search.clone();
+        let _ = self.window.update(cx, |_, window, cx| {
+            search.update(cx, |state, cx| state.set_value("", window, cx));
+        });
+    }
+
+    /// Enter in the search box: a query that matches an existing device
+    /// just selects it; anything else must parse as `ip` or `ip:port`
+    /// and becomes a direct-connect request to the daemon.
+    fn connect_from_search(&mut self, search: &Entity<InputState>, cx: &mut Context<Self>) {
+        let query = search.read(cx).value().trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let filter = query.to_lowercase();
+        if let Some(entry) = self.clients.iter().find(|entry| entry.matches(&filter)) {
+            self.selected = Some(entry.handle);
+            self.clear_search(cx);
+            cx.notify();
+            return;
+        }
+
+        let Some((ip, port)) = parse_direct_address(&query) else {
+            self.notify_now(
+                Notification::warning(format!(
+                    "未找到匹配「{query}」的设备，它也不是有效地址（如 192.168.1.10 或 192.168.1.10:{DEFAULT_PORT}）"
+                )),
+                cx,
+            );
+            return;
+        };
+        if self.writer.is_none() {
+            self.notify_now(Notification::error("服务未连接，无法发起连接请求"), cx);
+            return;
+        }
+        self.request(FrontendRequest::ConnectTo(ip, port));
+        self.pending_connect = Some(ip);
+        self.notify_now(
+            Notification::info(format!("正在向 {ip}:{port} 发起连接请求，等待对方确认…")),
+            cx,
+        );
+        self.clear_search(cx);
+        cx.notify();
     }
 
     fn feed_label(&self) -> SharedString {
@@ -215,7 +375,7 @@ impl Console {
         presence_dot(color)
     }
 
-    fn render_shell(&self, visible: &[&DeviceEntry], cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_shell(&self, visible: &[DeviceEntry], cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
@@ -232,7 +392,7 @@ impl Console {
             .child(self.render_status_bar(cx))
     }
 
-    fn render_main(&self, visible: &[&DeviceEntry], cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_main(&self, visible: &[DeviceEntry], cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .flex_1()
             .min_h_0()
@@ -243,7 +403,7 @@ impl Console {
 
     fn render_device_panel(
         &self,
-        visible: &[&DeviceEntry],
+        visible: &[DeviceEntry],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         v_flex()
@@ -259,7 +419,7 @@ impl Console {
 
     fn render_device_list(
         &self,
-        visible: &[&DeviceEntry],
+        visible: &[DeviceEntry],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let rows: Vec<AnyElement> = if visible.is_empty() {
@@ -295,7 +455,6 @@ impl Console {
         let online = entry.online();
         let name = entry.name();
         let addr = entry.addr_label();
-        let position = entry.position_label();
 
         h_flex()
             .id(("device-row", handle))
@@ -318,7 +477,11 @@ impl Console {
                     .min_w_0()
                     .child(
                         div()
-                            .text_color(cx.theme().foreground)
+                            .text_color(if online {
+                                cx.theme().foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
                             .truncate()
                             .child(name),
                     )
@@ -330,12 +493,29 @@ impl Console {
                             .child(addr),
                     ),
             )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(position),
-            )
+            .child(self.render_row_chips(entry, cx))
+    }
+
+    /// Right-aligned status chips: online/offline plus the reverse
+    /// dial marker (direct stays unlabeled — it is the quiet default).
+    fn render_row_chips(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+        let mut chips = h_flex().gap_1().flex_shrink_0();
+        let (label, tone) = if entry.state.resolving {
+            ("连接中", cx.theme().muted_foreground)
+        } else if entry.online() {
+            ("在线", cx.theme().success)
+        } else {
+            ("离线", cx.theme().muted_foreground)
+        };
+        chips = chips.child(chip(label, tone.opacity(0.15), tone));
+        if entry.config.connect_mode == ConnectMode::Reverse {
+            chips = chips.child(chip(
+                entry.connect_mode_label(),
+                cx.theme().secondary,
+                cx.theme().secondary_foreground,
+            ));
+        }
+        chips
     }
 
     fn render_self_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -373,102 +553,6 @@ impl Console {
             .min_h_0()
             .child(self.render_detail(cx))
             .child(self.render_layout_strip(cx))
-    }
-
-    fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .id("device-detail")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .child(match self.selected_entry() {
-                Some(entry) => self.render_device_detail(entry, cx).into_any_element(),
-                None => self.render_detail_placeholder(cx).into_any_element(),
-            })
-    }
-
-    fn selected_entry(&self) -> Option<&DeviceEntry> {
-        self.selected
-            .and_then(|handle| self.clients.iter().find(|entry| entry.handle == handle))
-    }
-
-    fn render_detail_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .text_sm()
-            .text_color(muted)
-            .child("选择左侧设备查看详情")
-    }
-
-    fn render_device_detail(
-        &self,
-        entry: &DeviceEntry,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let online = entry.online();
-        let muted = cx.theme().muted_foreground;
-        let name = entry.name();
-        let addr = entry.addr_label();
-        let position = entry.position_label();
-        let port = entry.config.port.to_string();
-
-        v_flex()
-            .p_4()
-            .gap_3()
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(self.render_presence_dot(online, cx))
-                    .child(div().text_lg().child(format!(
-                        "{}{}",
-                        name,
-                        if online { "" } else { " · 离线" }
-                    ))),
-            )
-            .child(self.render_detail_line("地址", addr, muted))
-            .child(self.render_detail_line("屏幕位置", position.into(), muted))
-            .child(self.render_detail_line("端口", port.into(), muted))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("edit-device")
-                            .outline()
-                            .small()
-                            .label("修改配置")
-                            .disabled(true),
-                    )
-                    .child(
-                        Button::new("remove-device")
-                            .outline()
-                            .small()
-                            .label("移除设备")
-                            .disabled(true),
-                    ),
-            )
-    }
-
-    fn render_detail_line(
-        &self,
-        label: &str,
-        value: SharedString,
-        label_color: gpui_kit::Hsla,
-    ) -> impl IntoElement {
-        h_flex()
-            .gap_3()
-            .text_sm()
-            .child(
-                div()
-                    .w_16()
-                    .flex_shrink_0()
-                    .text_color(label_color)
-                    .child(label.to_string()),
-            )
-            .child(value)
     }
 
     /// Static preview of the layout canvas; drag-and-drop lands in the
@@ -546,26 +630,94 @@ impl Console {
     }
 }
 
+/// Small rounded label, design v2.2's `.mh-badge`: soft tinted
+/// background with a matching foreground.
+fn chip(label: &'static str, bg: Hsla, fg: Hsla) -> Div {
+    h_flex()
+        .h_5()
+        .px_2()
+        .items_center()
+        .rounded_full()
+        .text_xs()
+        .bg(bg)
+        .text_color(fg)
+        .flex_shrink_0()
+        .child(label.to_string())
+}
+
 fn presence_dot(color: Hsla) -> Div {
     div().size_2().rounded_full().bg(color).flex_shrink_0()
+}
+
+/// Parse a direct-connect query: a bare IP, or an `ip:port` pair
+/// (brackets required around IPv6 with a port). Hostnames are not
+/// dialed — the daemon's candidate list is IP-based.
+fn parse_direct_address(query: &str) -> Option<(IpAddr, u16)> {
+    let query = query.trim();
+    if let Ok(ip) = query.parse::<IpAddr>() {
+        return Some((ip, DEFAULT_PORT));
+    }
+    let (host, port) = query.rsplit_once(':')?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = port.parse::<u16>().ok()?;
+    if port == 0 {
+        return None;
+    }
+    host.parse::<IpAddr>().ok().map(|ip| (ip, port))
 }
 
 impl Render for Console {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let filter = self.search.read(cx).value().to_lowercase();
-        let visible: Vec<&DeviceEntry> = self
-            .clients
-            .iter()
-            .filter(|entry| {
-                filter.is_empty()
-                    || entry
-                        .config
-                        .hostname
-                        .as_deref()
-                        .is_some_and(|h| h.to_lowercase().contains(&filter))
-                    || entry.addr_label().to_lowercase().contains(&filter)
-            })
-            .collect();
+        let visible: Vec<DeviceEntry> = if filter.is_empty() {
+            self.clients.clone()
+        } else {
+            self.clients
+                .iter()
+                .filter(|entry| entry.matches(&filter))
+                .cloned()
+                .collect()
+        };
         self.render_shell(&visible, cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn parse_direct_address_accepts_bare_ip() {
+        assert_eq!(
+            parse_direct_address("192.168.1.10"),
+            Some((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), DEFAULT_PORT))
+        );
+        assert_eq!(
+            parse_direct_address(" ::1 "),
+            Some((IpAddr::V6("::1".parse().unwrap()), DEFAULT_PORT))
+        );
+    }
+
+    #[test]
+    fn parse_direct_address_accepts_ip_port() {
+        assert_eq!(
+            parse_direct_address("10.8.15.60:4356"),
+            Some((IpAddr::V4(Ipv4Addr::new(10, 8, 15, 60)), 4356))
+        );
+        assert_eq!(
+            parse_direct_address("[::1]:5000"),
+            Some((IpAddr::V6("::1".parse().unwrap()), 5000))
+        );
+    }
+
+    #[test]
+    fn parse_direct_address_rejects_hostnames_and_garbage() {
+        assert_eq!(parse_direct_address("my-laptop"), None);
+        assert_eq!(parse_direct_address("300.1.2.3"), None);
+        assert_eq!(parse_direct_address("10.0.0.1:"), None);
+        assert_eq!(parse_direct_address("10.0.0.1:0"), None);
+        assert_eq!(parse_direct_address("10.0.0.1:99999"), None);
+        assert_eq!(parse_direct_address(""), None);
     }
 }

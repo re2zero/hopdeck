@@ -739,6 +739,13 @@ pub enum FrontendRequest {
     Activate(ClientHandle, bool),
     /// add a new client
     Create,
+    /// Direct-connect from the console search box: ensure a client
+    /// exists for `ip:port` (reusing one that already lists the
+    /// address among its candidates), activate it, and start dialing
+    /// immediately. The outcome reaches the frontend through the
+    /// usual `Created`/`State` events — an unreachable peer simply
+    /// stays offline in the list.
+    ConnectTo(IpAddr, u16),
     /// change the listen port (recreate udp listener)
     ChangePort(u16),
     /// remove a client
@@ -1011,6 +1018,24 @@ mod tests {
         assert!(peer.natural_scroll);
         assert_eq!(peer.mouse_sensitivity, 1.5);
         assert!(!peer.clipboard_receive);
+    }
+
+    #[test]
+    fn frontend_request_connect_to_wire_shape_is_pinned() {
+        // The request stream is line-delimited JSON with no handshake;
+        // the exact rendering matters because a daemon and frontends
+        // built from different revisions can meet on one socket.
+        use std::net::Ipv4Addr;
+        let request = FrontendRequest::ConnectTo(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 4356);
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(json, r#"{"ConnectTo":["192.168.1.10",4356]}"#);
+        match serde_json::from_str(&json).unwrap() {
+            FrontendRequest::ConnectTo(ip, port) => {
+                assert_eq!(ip.to_string(), "192.168.1.10");
+                assert_eq!(port, 4356);
+            }
+            other => panic!("wrong variant decoded: {other:?}"),
+        }
     }
 
     #[test]

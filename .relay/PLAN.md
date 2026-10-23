@@ -16,7 +16,8 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
 ## 当前焦点
-- 当前里程碑：**M2b 实现**（v2.2 设计稿 2026-10-23 获公子确认，D17 组件选型落地）。**增量一已完成**：`mousehop-console` crate（gpui-kit 0.8.0）+ daemon IPC 接线 + 定高 780 窗口骨架（TitleBar / 左列搜索+设备列表+本机栏 / 右列详情+布局占位条 / 状态栏），双进程 Xvfb 冒烟通过（列表与状态栏均为真实 daemon 数据）。**增量二**：设备详情完整化（操作按钮启用）+ 搜索直连（新 `FrontendRequest` 变体：向任意 IP 发起连接请求）+ 列表实时状态徽标。随后：认证流 UI（D15）→ 设置浮层 → 交互式布局画布（拖拽自研）→ 调试日志栏。访问密码认证协议实现前另出小设计稿；云端仅占位入口。设计稿：/home/zero/.zcode/v2/visualizations/3d252e463bc1b58d89f0863df626aae944882a3148442cbafe958cd4e62fbe9a/mousehop-console-v2.html
+- 当前里程碑：**M2b 实现**。**增量二已完成（2026-10-23，Xvfb 交互冒烟全绿）**：搜索直连（新 `FrontendRequest::ConnectTo(IpAddr, u16)`：复用/新建客户端 + 激活 + Ping 踢立即拨号，回车触发、成功自动选中、失败以列表离线呈现）+ 设备详情完整化（概览 kv 含对端版本/往返延迟，连接/修改配置/移除+AlertDialog 二次确认/远程查看占位）+ 编辑表单（hostname/地址/端口 + 位置与连接方式芯片选择，逐字段差异下发 Update* 请求）+ 列表实时徽标（在线/连接中/离线 + 反向外呼芯片，离线置灰可选中）。console 拆分为 `console/{mod,detail}.rs`。**增量三**：认证流 UI（D15：ConnectionAttempt 授权请求对话框 + 安全区重置指纹二次确认 + IncomingPeerConfig 展示）→ 设置浮层 → 交互式布局画布（拖拽自研）→ 调试日志栏。
+- 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。设计稿：/home/zero/.zcode/v2/visualizations/3d252e463bc1b58d89f0863df626aae944882a3148442cbafe958cd4e62fbe9a/mousehop-console-v2.html
 - 真机验证欠账（等用户硬件/环境）：M1 的 vhci 真机注入、M2a 的真实两机反向场景（本机为单机双实例 + Xvfb + dummy capture 模拟，方法见 journal/M2a-REPORT.md）。
 
 ## 决策与死路（追加式）
@@ -42,6 +43,8 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-23 [D15·v2 设计迭代] 公子对 v2 反馈两条：① 认证流重做——「复制指纹」无意义（不应要求手动填指纹到其它机器），改为远程控制式认证：能连通即发认证请求，支持**对方确认**与**访问密码**两种方式，指纹仅在首次确认时核对一次、此后自动信任；「重置指纹」移入安全区并强制二次确认（防误触）。② 布局区从底部通栏移到**右栏设备详情下方**（详情内容少时填补空旷），并支持**从列表拖拽设备到布局画布**放置（取消「未布置」区）。→ v2.1 稿。实现备注：认证请求/密码对应 proto 已有能力（Hello/授权表），「访问密码」为新需求（被控端设置 + 连接握手附加认证，实现期待设计）；「撤销信任」= 移除 authorized_fingerprints 条目。
 - 2026-10-23 [D16·v2.1 设计迭代] 公子认可 v2.1（「不错」）并提细节两条：① **窗口高度不随内容变化**（编辑模式切换等场景不再「秃噜」）——定高 780px，详情区内部滚动；共享选项改**卡片式布局**（剪贴板/自然滚动/灵敏度三卡，紧凑）。② 布局画布支持**「下」屏并扩展多屏**：左/右/下各 1 槽 + 上排最多 3 槽（合计 6），离线设备可预布局（半透明+离线标注），容量满后拖入槽自动消失、占用槽拒绝重复放置并 toast 提示。→ v2.2 稿（同路径覆盖）。
 - 2026-10-23 [D17·M2b 组件选型落地] 控制端 crate `mousehop-console` 依赖 **gpui-kit 0.8.0 单一入口**（组件层 gpui-component 0.8.0、底座 gpui-pre =0.3.9、资产层 gpui-kit-assets 全量 1829 图标 Lucide 目录——`gpui_kit::assets::IconName`；component::IconName 只是兼容子集）。**ely 暂缓引入**：ely-gpui-component 0.1.1 无 crates.io 发布、仅本地 checkout，path 依赖破坏工作区可复现性；设计稿 v2.2 全部控件 gpui-kit 已覆盖（TitleBar/StatusBar/Input/Button/Switch/Dialog/Notification/Tabs/Empty），ely 需要时走 git 依赖并先以 compat/kit 证明共存。D7 前置已通过：compat/kit 示例构建 1m28s + Xvfb 运行 + 截图验证（ely 与 gpui-kit 同窗渲染正常）。布局拖拽仍需自研（D7 结论不变，ely 未实装拖拽原语）。
+- 2026-10-23 [D18·增量二语义] `FrontendRequest::ConnectTo(IpAddr, u16)`：目标 IP 已存在于任一客户端候选集则复用（不建重复项），否则**新建持久客户端**（HANDOFF-006 曾设想「临时客户端」，实现取持久——与设备列表产品语义一致）；随后激活（可能挤占同位置的原激活客户端，KVM 每边一台的既有语义）并 `conn.send(Ping)` 立即拨号（Direct 模式原为懒拨号，显式直连须即时反馈）。拨号失败不产生独立错误事件——客户端以离线态呈现在列表（与懒拨号路径一致），认证流增量再补「连接中/待认证」中间态。
+- 2026-10-23 [事实·gpui-kit 0.8.0 API 增补] 订阅回调（`cx.subscribe`）无 `&mut Window`：Console 存 `AnyWindowHandle`（`window.window_handle()`，Copy），经 `handle.update(cx, |_, window, cx|)` 弹 Notification / 改 InputState（`set_value` 需 window）；`AnyWindowHandle::update` 接受 `C: AppContext`（`Context<T>` 满足）。`InputEvent::PressEnter { secondary, shift }`。AlertDialog 由 `WindowExt::open_alert_dialog(cx, build)` 打开，build 闭包是 `Fn`——捕获变量须在内部 clone 后再 move 进 on_ok；默认 Cancel 文案是英文，需 `.cancel_text("取消")`。`overflow_y_scroll` 在 `StatefulInteractiveElement`（非 Styled）。图标无 `Trash2`，用 `Trash`。daemon(`--no-default-features`) 与 console 同 cargo 调用构建会因 ashpd 的 async-io/tokio 特性互斥而失败——**分开构建**。
 
 ## 接力索引
 - 会话账本：`.relay/state.json`

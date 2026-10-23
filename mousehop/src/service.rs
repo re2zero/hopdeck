@@ -18,8 +18,8 @@ use input_event::{ClipboardEvent, Event as InputEvent};
 use local_channel::mpsc::{Receiver, channel};
 use log;
 use mousehop_ipc::{
-    AppIdent, AsyncFrontendListener, ClientHandle, ConnectMode, ConnectionMode, DEFAULT_PORT,
-    FrontendEvent, FrontendRequest, HostKind, IncomingPeerConfig, IpcError,
+    AppIdent, AsyncFrontendListener, ClientConfig, ClientHandle, ConnectMode, ConnectionMode,
+    DEFAULT_PORT, FrontendEvent, FrontendRequest, HostKind, IncomingPeerConfig, IpcError,
     IpcListenerCreationError, Position, RemoteHostState, Status,
 };
 use mousehop_proto::ProtoEvent;
@@ -421,6 +421,10 @@ impl Service {
             FrontendRequest::ChangePort(port) => self.change_port(port),
             FrontendRequest::Create => {
                 self.add_client();
+                self.save_config().await;
+            }
+            FrontendRequest::ConnectTo(ip, port) => {
+                self.connect_to(ip, port).await;
                 self.save_config().await;
             }
             FrontendRequest::Delete(handle) => {
@@ -1416,6 +1420,51 @@ impl Service {
         log::info!("added client {handle}");
         let (c, s) = self.client_manager.get_state(handle).unwrap();
         self.notify_frontend(FrontendEvent::Created(handle, c, s));
+    }
+
+    /// Console direct-connect (search box): reuse an existing client
+    /// that already lists `ip` among its candidates, otherwise create
+    /// one, then activate it and kick a dial right away — Direct mode
+    /// otherwise waits for the first lazy send, which would leave the
+    /// console staring at an offline row after an explicit connect.
+    /// Only one client may hold a screen position, so activating can
+    /// deactivate the previous occupant; frontends mirror that via the
+    /// resulting State events.
+    async fn connect_to(&mut self, ip: IpAddr, port: u16) {
+        let port = if port == 0 { DEFAULT_PORT } else { port };
+        let existing = self
+            .client_manager
+            .get_client_states()
+            .into_iter()
+            .find(|(_, c, s)| c.fix_ips.contains(&ip) || s.ips.contains(&ip));
+        let handle = match existing {
+            Some((handle, _, _)) => {
+                log::info!("connect-to {ip}:{port}: reusing existing client {handle}");
+                handle
+            }
+            None => {
+                let handle = self.client_manager.add_client();
+                self.client_manager.set_config(
+                    handle,
+                    ClientConfig {
+                        fix_ips: vec![ip],
+                        port,
+                        ..Default::default()
+                    },
+                );
+                self.client_manager.set_fix_ips(handle, vec![ip]);
+                let (c, s) = self.client_manager.get_state(handle).unwrap();
+                self.notify_frontend(FrontendEvent::Created(handle, c, s));
+                log::info!("connect-to {ip}:{port}: created client {handle}");
+                handle
+            }
+        };
+        self.activate_client(handle);
+        if let Err(e) = self.conn.send(ProtoEvent::Ping, handle).await {
+            // A failed dial leaves the client offline in the list; the
+            // retry backoff gates re-attempts, same as the lazy path.
+            log::debug!("connect-to {ip}:{port}: dial pending: {e}");
+        }
     }
 
     fn set_client_active(&mut self, handle: ClientHandle, active: bool) {
