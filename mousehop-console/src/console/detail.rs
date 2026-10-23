@@ -12,6 +12,7 @@ use gpui_kit::{
         h_flex,
         input::{Input, InputState},
         notification::Notification,
+        switch::Switch,
         v_flex,
     },
     div,
@@ -110,8 +111,52 @@ impl Console {
             .child(self.render_kv("端口", entry.config.port.to_string().into(), muted))
             .child(self.render_kv("对端版本", peer_version(&entry.state), muted))
             .child(self.render_kv("往返延迟", latency_label(&entry.state), muted))
+            .child(self.render_share_section(entry, cx))
             .child(self.render_trust_section(entry, cx))
             .child(self.render_device_actions(entry, cx))
+    }
+
+    /// Send-side sharing for this device (design v2.2's detail 共享选项
+    /// row): the per-client `clipboard_send` gate. Clipboard text only
+    /// flows when this AND the peer's receive gate (settings overlay)
+    /// are on. The daemon echoes the change through the usual `State`
+    /// event, so the switch state is the config mirror.
+    fn render_share_section(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let handle = entry.handle;
+        let name = entry.name();
+        let writer = self.writer.clone();
+        let entity = cx.entity();
+
+        div().child(
+            v_flex()
+                .mt_1()
+                .child(self.render_kv_section("共享选项", cx))
+                .child(super::settings::option_row(
+                    "剪贴板发送",
+                    "本机剪贴板变更同步给该设备（对方也需开启接收）",
+                    Switch::new(SharedString::from(format!("clip-send-{handle}")))
+                        .checked(entry.config.clipboard_send)
+                        .on_click(move |checked, _, cx| {
+                            if let Some(writer) = &writer {
+                                writer.send(FrontendRequest::SetClientClipboardSend(
+                                    handle, *checked,
+                                ));
+                            }
+                            entity.update(cx, |this, cx| {
+                                this.journal(
+                                    super::logbar::LogLevel::Info,
+                                    format!(
+                                        "剪贴板发送「{name}」→ {}",
+                                        if *checked { "开" } else { "关" }
+                                    ),
+                                );
+                            });
+                        })
+                        .small(),
+                    muted,
+                )),
+        )
     }
 
     /// Inline trust state (design D15): once the peer's fingerprint is
