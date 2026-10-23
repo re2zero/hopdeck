@@ -5,10 +5,11 @@
 //! detail and live list badges; increment 3 adds the authorization
 //! flow (connection-attempt dialog, inline trust state); increment 5
 //! adds the settings overlay (self info + per-trusted-peer sharing
-//! options). The interactive layout canvas lands in a later increment;
-//! its surface is a placeholder so the frame stays stable.
+//! options); increment 6 adds the interactive layout canvas: device
+//! rows drag onto the six layout slots (`layout.rs`).
 
 mod detail;
+mod layout;
 mod settings;
 
 use crate::ipc::{FeedEvent, RequestWriter};
@@ -29,6 +30,8 @@ use gpui_kit::{
     },
     div,
 };
+
+use self::layout::DeviceDrag;
 use mousehop_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectMode, DEFAULT_PORT, FrontendEvent,
     FrontendRequest, IncomingPeerConfig, Position, Status,
@@ -649,6 +652,16 @@ impl Console {
                 this.selected = Some(handle);
                 cx.notify();
             }))
+            // Drag source for the layout canvas (`layout.rs`); the ghost
+            // floats under the cursor until the drop resolves.
+            .on_drag(
+                DeviceDrag {
+                    handle,
+                    name: name.clone(),
+                    online,
+                },
+                |drag, _, _, cx| cx.new(|_| drag.clone()),
+            )
             .child(self.render_presence_dot(online, cx))
             .child(
                 v_flex()
@@ -764,55 +777,7 @@ impl Console {
             .min_w_0()
             .min_h_0()
             .child(self.render_detail(cx))
-            .child(self.render_layout_strip(cx))
-    }
-
-    /// Static preview of the layout canvas; drag-and-drop lands in the
-    /// next increment. Host box in the middle, one slot per side.
-    fn render_layout_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .py_4()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .child(self.render_layout_slot("左侧", cx))
-            .child(self.render_layout_host(cx))
-            .child(self.render_layout_slot("右侧", cx))
-    }
-
-    fn render_layout_slot(&self, label: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
-        h_flex()
-            .w_20()
-            .h_12()
-            .items_center()
-            .justify_center()
-            .rounded_md()
-            .border_1()
-            .border_dashed()
-            .border_color(muted)
-            .text_xs()
-            .text_color(muted)
-            .child(label.to_string())
-    }
-
-    fn render_layout_host(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let fg = cx.theme().secondary_foreground;
-        v_flex()
-            .w_24()
-            .h_16()
-            .items_center()
-            .justify_center()
-            .gap_1()
-            .rounded_md()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary)
-            .child(Icon::new(IconName::Monitor).small().text_color(fg))
-            .child(div().text_xs().text_color(fg).child("本机"))
+            .child(self.render_layout_canvas(cx))
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
