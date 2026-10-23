@@ -303,12 +303,24 @@ impl Console {
             .collect();
         match placement_rejection(pos, occupants.len()) {
             Some(PlacementRejection::TopFull) => {
+                self.journal(
+                    super::logbar::LogLevel::Warn,
+                    format!("布局拒绝：上排已满（{name} → 上方）"),
+                );
                 window.push_notification(
                     Notification::warning(format!("上排最多放置 {TOP_SLOTS} 块屏")),
                     cx,
                 );
             }
             Some(PlacementRejection::SlotOccupied) => {
+                self.journal(
+                    super::logbar::LogLevel::Warn,
+                    format!(
+                        "布局拒绝：{}屏已有「{}」（{name}）",
+                        position_label(pos),
+                        occupants[0]
+                    ),
+                );
                 window.push_notification(
                     Notification::warning(format!(
                         "{}屏已有「{}」，先移出再放置",
@@ -320,6 +332,10 @@ impl Console {
             }
             None => {
                 self.request(FrontendRequest::UpdatePosition(handle, pos));
+                self.journal(
+                    super::logbar::LogLevel::Info,
+                    format!("布局：{name} → {}屏", position_label(pos)),
+                );
                 window.push_notification(
                     Notification::success(format!("「{name}」已放到{}屏", position_label(pos))),
                     cx,

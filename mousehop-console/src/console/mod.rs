@@ -6,21 +6,27 @@
 //! flow (connection-attempt dialog, inline trust state); increment 5
 //! adds the settings overlay (self info + per-trusted-peer sharing
 //! options); increment 6 adds the interactive layout canvas: device
-//! rows drag onto the six layout slots (`layout.rs`).
+//! rows drag onto the six layout slots (`layout.rs`); increment 7 adds
+//! the debug log bar: a ring-buffer log sink fed by a console-side
+//! journal plus the `log` facade, rendered above the status bar
+//! (`logbar.rs`).
 
 mod detail;
 mod layout;
+/// `pub(crate)`: `main.rs` creates the shared sink and installs the
+/// facade logger before the window exists.
+pub(crate) mod logbar;
 mod settings;
 
 use crate::ipc::{FeedEvent, RequestWriter};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, AppContext, ClickEvent, Context, Div, Entity, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, Styled, Window,
     assets::IconName,
     component::{
-        ActiveTheme, Icon, Sizable, TitleBar, WindowExt,
+        ActiveTheme, Icon, Selectable, Sizable, TitleBar, WindowExt,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -32,6 +38,7 @@ use gpui_kit::{
 };
 
 use self::layout::DeviceDrag;
+use self::logbar::{LogLevel, LogSink};
 use mousehop_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectMode, DEFAULT_PORT, FrontendEvent,
     FrontendRequest, IncomingPeerConfig, Position, Status,
@@ -88,6 +95,13 @@ pub struct Console {
     emulation: Status,
     self_hostname: SharedString,
     search: Entity<InputState>,
+    /// Debug log bar (design D14⑦): open/closed, the facade capture
+    /// level, the shared ring buffer and its poll bookkeeping.
+    debug_open: bool,
+    log_level: LogLevel,
+    log_sink: LogSink,
+    log_gen_seen: std::cell::Cell<u64>,
+    log_scroll: ScrollHandle,
     /// Window access for notifications and input edits outside event
     /// handlers (subscribe callbacks have no `&mut Window`).
     window: AnyWindowHandle,
@@ -203,7 +217,7 @@ struct EditDraft {
 }
 
 impl Console {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, log_sink: LogSink) -> Self {
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder("搜索设备，或输入 IP 回车直连"));
         cx.subscribe(&search, |this, search, event, cx| match event {
@@ -223,7 +237,8 @@ impl Console {
             .map(|h| h.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "本机".to_string());
 
-        Self {
+        let log_level = logbar::initial_level();
+        let console = Self {
             feed: FeedState::Connecting,
             writer: None,
             clients: Vec::new(),
@@ -245,8 +260,16 @@ impl Console {
             emulation: Status::default(),
             self_hostname: self_hostname.into(),
             search,
+            debug_open: false,
+            log_level,
+            log_sink,
+            log_gen_seen: std::cell::Cell::new(0),
+            log_scroll: ScrollHandle::new(),
             window: window.window_handle(),
-        }
+        };
+        console.spawn_log_poll(cx);
+        console.journal(LogLevel::Info, "控制台启动");
+        console
     }
 
     /// Entry point for everything the IPC layer observes.
@@ -259,8 +282,16 @@ impl Console {
                 // the statuses, the port and this device's key
                 // fingerprint the settings overlay shows.
                 self.request(FrontendRequest::Sync);
+                self.journal(LogLevel::Ok, "服务通道已建立");
             }
             FeedEvent::Disconnected(reason) => {
+                self.journal(
+                    LogLevel::Error,
+                    match &reason {
+                        Some(reason) => format!("服务通道断开：{reason}"),
+                        None => "服务通道断开".to_string(),
+                    },
+                );
                 self.feed = FeedState::Disconnected(reason.map(SharedString::from));
                 self.writer = None;
                 self.clients.clear();
@@ -281,6 +312,7 @@ impl Console {
     fn apply_daemon_event(&mut self, event: FrontendEvent, cx: &mut Context<Self>) {
         match event {
             FrontendEvent::Enumerate(list) => {
+                self.journal(LogLevel::Debug, format!("同步设备列表：{} 台", list.len()));
                 self.clients = list
                     .into_iter()
                     .map(|(handle, config, state)| DeviceEntry::new(handle, config, state))
@@ -288,11 +320,21 @@ impl Console {
                 self.sort_clients();
             }
             FrontendEvent::Created(handle, config, state) => {
-                self.clients.push(DeviceEntry::new(handle, config, state));
+                let entry = DeviceEntry::new(handle, config, state);
+                self.journal(
+                    LogLevel::Info,
+                    format!("设备新增：{}（{}）", entry.name(), entry.addr_label()),
+                );
+                self.clients.push(entry);
                 self.sort_clients();
                 self.settle_pending_connect(handle, cx);
             }
             FrontendEvent::State(handle, config, state) => {
+                // Alive transitions are journaled from the pre-update
+                // snapshot; the borrow of `entry_mut` can't span it.
+                let transition = self.entry(handle).and_then(|entry| {
+                    (entry.state.alive != state.alive).then(|| (entry.name(), state.alive))
+                });
                 if let Some(entry) = self.entry_mut(handle) {
                     entry.config = config;
                     entry.state = state;
@@ -301,9 +343,18 @@ impl Console {
                         .push(DeviceEntry::new(handle, config, state.clone()));
                     self.sort_clients();
                 }
+                if let Some((name, alive)) = transition {
+                    self.journal(
+                        if alive { LogLevel::Ok } else { LogLevel::Warn },
+                        format!("{}{}", name, if alive { " 上线" } else { " 离线" }),
+                    );
+                }
                 self.settle_pending_connect(handle, cx);
             }
             FrontendEvent::Deleted(handle) => {
+                if let Some(entry) = self.entry(handle) {
+                    self.journal(LogLevel::Info, format!("设备移除：{}", entry.name()));
+                }
                 self.clients.retain(|entry| entry.handle != handle);
                 if self.selected == Some(handle) {
                     self.selected = None;
@@ -313,6 +364,15 @@ impl Console {
                 }
             }
             FrontendEvent::PortChanged(port, error) => {
+                match &error {
+                    Some(error) => {
+                        self.journal(LogLevel::Error, format!("UDP 端口 {port} 异常：{error}"))
+                    }
+                    None if port != 0 => {
+                        self.journal(LogLevel::Info, format!("UDP 端口监听 {port}"))
+                    }
+                    None => {}
+                }
                 self.port = port;
                 self.port_error = error.map(SharedString::from);
             }
@@ -322,6 +382,16 @@ impl Console {
             FrontendEvent::AuthorizedUpdated(keys) => {
                 // Once authorized the peer is past the gate; the badge
                 // reverts to connecting/offline until it dials through.
+                for (fp, peer) in &keys {
+                    if !self.authorized.contains_key(fp) {
+                        let name = if peer.description.is_empty() {
+                            short_fingerprint(fp).to_string()
+                        } else {
+                            peer.description.clone()
+                        };
+                        self.journal(LogLevel::Ok, format!("已授权：{name}"));
+                    }
+                }
                 self.awaiting_auth.retain(|fp, _| !keys.contains_key(fp));
                 self.authorized = keys;
             }
@@ -351,6 +421,13 @@ impl Console {
             return;
         }
         self.last_auth_prompt = Some((fingerprint.clone(), std::time::Instant::now()));
+        self.journal(
+            LogLevel::Info,
+            format!(
+                "认证请求：{}（等待本机确认）",
+                short_fingerprint(&fingerprint)
+            ),
+        );
         let writer = self.writer.clone();
         let input = self.auth_desc.clone();
         let window = self.window;
@@ -476,6 +553,7 @@ impl Console {
             return;
         }
         self.request(FrontendRequest::ConnectTo(ip, port));
+        self.journal(LogLevel::Info, format!("直连请求：{ip}:{port}"));
         self.pending_connect = Some(ip);
         self.retrying = Some((ip, port));
         self.retry_attempts = 1;
@@ -516,6 +594,10 @@ impl Console {
                         return false;
                     }
                     this.retry_attempts += 1;
+                    this.journal(
+                        LogLevel::Debug,
+                        format!("直连重试 {}/10 → {ip}:{port}", this.retry_attempts),
+                    );
                     this.request(FrontendRequest::ConnectTo(ip, port));
                     true
                 }) else {
@@ -565,6 +647,9 @@ impl Console {
                 ),
             )
             .child(self.render_main(visible, cx))
+            .when(self.debug_open, |shell| {
+                shell.child(self.render_log_bar(cx))
+            })
             .child(self.render_status_bar(cx))
     }
 
@@ -804,6 +889,17 @@ impl Console {
             .right(status_text(
                 format!("设备 {} 台", self.clients.len()).into(),
             ))
+            .right(
+                Button::new("toggle-debug-log")
+                    .icon(Icon::new(IconName::Bug))
+                    .ghost()
+                    .small()
+                    .selected(self.debug_open)
+                    .toggled(self.debug_open)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.set_debug_open(!this.debug_open, cx);
+                    })),
+            )
     }
 }
 

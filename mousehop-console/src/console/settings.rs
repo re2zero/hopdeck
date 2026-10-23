@@ -7,11 +7,11 @@
 //! request-send-without-local-state.
 
 use gpui_kit::{
-    ClickEvent, Context, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    App, ClickEvent, Context, Entity, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled, Window,
     assets::IconName,
     component::{
-        ActiveTheme, Icon, Sizable,
+        ActiveTheme, Icon, Selectable, Sizable,
         button::{Button, ButtonVariants},
         h_flex,
         switch::Switch,
@@ -22,6 +22,7 @@ use gpui_kit::{
 use mousehop_ipc::{FrontendRequest, IncomingPeerConfig};
 
 use super::Console;
+use super::logbar::LogLevel;
 
 impl Console {
     pub(super) fn render_settings_overlay(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -76,7 +77,8 @@ impl Console {
                             .p_4()
                             .gap_1()
                             .child(self.render_self_section(cx))
-                            .child(self.render_sharing_section(cx)),
+                            .child(self.render_sharing_section(cx))
+                            .child(self.render_log_settings(cx)),
                     ),
             )
     }
@@ -143,47 +145,77 @@ impl Console {
             .border_color(cx.theme().border)
             .rounded_md()
             .child(div().text_sm().child(name))
-            .child(self.render_option_row(
+            .child(option_row(
                 "剪贴板接收",
                 "应用该设备发来的剪贴板文本",
                 self.render_clipboard_switch(fingerprint, peer),
                 muted,
             ))
-            .child(self.render_option_row(
+            .child(option_row(
                 "自然滚动",
                 "反转该设备发来的滚轮方向",
                 self.render_natural_scroll_switch(fingerprint, peer),
                 muted,
             ))
-            .child(self.render_option_row(
+            .child(option_row(
                 "指针灵敏度",
                 "该设备指针移动速度的倍率",
                 self.render_sensitivity_stepper(fingerprint, peer, cx),
                 muted,
             ))
     }
+}
 
-    /// Label + hint on the left, the control on the right.
-    fn render_option_row(
-        &self,
-        label: &str,
-        hint: &str,
-        control: impl IntoElement,
-        muted: Hsla,
-    ) -> impl IntoElement {
-        h_flex()
-            .items_center()
-            .gap_3()
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .child(div().text_sm().child(label.to_string()))
-                    .child(div().text_xs().text_color(muted).child(hint.to_string())),
-            )
-            .child(control)
-    }
+/// Label + hint on the left, the control on the right. Free-standing so
+/// the log bar's settings section (`logbar.rs`) shares the row style.
+pub(super) fn option_row(
+    label: &str,
+    hint: &str,
+    control: impl IntoElement,
+    muted: Hsla,
+) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap_3()
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .child(div().text_sm().child(label.to_string()))
+                .child(div().text_xs().text_color(muted).child(hint.to_string())),
+        )
+        .child(control)
+}
 
+/// The debug-bar toggle. `on_click` carries no console access, so the
+/// owning entity is captured and the flip goes through
+/// `Console::set_debug_open`.
+pub(super) fn log_switch(entity: Entity<Console>, checked: bool) -> Switch {
+    Switch::new("settings-debug-log")
+        .checked(checked)
+        .on_click(move |checked, _, cx| {
+            entity.update(cx, |this, cx| this.set_debug_open(*checked, cx));
+        })
+        .small()
+}
+
+/// One 日志级别 chip (info / debug / trace). `selected` drives the
+/// active styling; the caller's listener flips the capture level.
+pub(super) fn level_button(
+    level: LogLevel,
+    selected: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    Button::new(SharedString::from(format!("log-level-{}", level.name())))
+        .label(level.name())
+        .ghost()
+        .small()
+        .selected(selected)
+        .toggled(selected)
+        .on_click(on_click)
+}
+
+impl Console {
     fn render_clipboard_switch(
         &self,
         fingerprint: &str,

@@ -12,3 +12,4 @@ gpui-kit = "0.8.0"
 hostname = "0.4.0"
 log = "0.4.20"
 mousehop-ipc = { workspace = true }
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }

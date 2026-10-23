@@ -7,7 +7,13 @@ use gpui_kit::{
 };
 
 fn main() {
-    gpui_kit::application().run(|cx: &mut App| {
+    // The debug log bar's facade capture must exist before any
+    // dependency logs: install it ahead of the window.
+    let log_sink = console::logbar::LogSink::new();
+    let log_level = console::logbar::initial_level();
+    console::logbar::install_facade_logger(log_sink.clone(), log_level);
+
+    gpui_kit::application().run(move |cx: &mut App| {
         gpui_kit::init(cx);
 
         // The console keeps a fixed product height (design D16): content
@@ -24,7 +30,7 @@ fn main() {
         };
 
         let (_, console) = gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| Console::new(window, cx))
+            cx.new(|cx| Console::new(window, cx, log_sink.clone()))
         })
         .expect("failed to open console window");
 
