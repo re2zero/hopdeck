@@ -178,7 +178,11 @@ impl Console {
             )
     }
 
-    fn render_kv_section(&self, title: &str, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_kv_section(
+        &self,
+        title: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         div()
             .mt_2()
             .text_xs()
@@ -186,7 +190,7 @@ impl Console {
             .child(title.to_string())
     }
 
-    fn render_kv(
+    pub(super) fn render_kv(
         &self,
         label: &str,
         value: SharedString,

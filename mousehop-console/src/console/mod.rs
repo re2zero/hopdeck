@@ -3,11 +3,13 @@
 //! The frame is the fixed-height shell (design D16) fed by live daemon
 //! state. Increment 2 added search direct-connect, the editable device
 //! detail and live list badges; increment 3 adds the authorization
-//! flow (connection-attempt dialog, inline trust state). The settings
-//! overlay and the interactive layout canvas land in later increments;
-//! their surfaces are placeholders so the frame stays stable.
+//! flow (connection-attempt dialog, inline trust state); increment 5
+//! adds the settings overlay (self info + per-trusted-peer sharing
+//! options). The interactive layout canvas lands in a later increment;
+//! its surface is a placeholder so the frame stays stable.
 
 mod detail;
+mod settings;
 
 use crate::ipc::{FeedEvent, RequestWriter};
 use gpui_kit::prelude::FluentBuilder;
@@ -17,7 +19,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, Window,
     assets::IconName,
     component::{
-        ActiveTheme, Disableable, Icon, Sizable, TitleBar, WindowExt,
+        ActiveTheme, Icon, Sizable, TitleBar, WindowExt,
         button::{Button, ButtonVariants},
         h_flex,
         input::{Input, InputEvent, InputState},
@@ -68,6 +70,11 @@ pub struct Console {
     edit: Option<EditDraft>,
     /// Mirror of the daemon's `authorized_fingerprints`.
     authorized: HashMap<String, IncomingPeerConfig>,
+    /// Whether the settings overlay (design D15) is open.
+    settings_open: bool,
+    /// This device's public-key fingerprint (`PublicKeyFingerprint`,
+    /// pushed by the daemon's `Sync`).
+    self_fingerprint: Option<String>,
     /// Reusable description input for the authorization dialog (the
     /// dialog is opened from window-less contexts, so the input lives
     /// on the console).
@@ -226,6 +233,8 @@ impl Console {
             awaiting_auth: HashMap::new(),
             edit: None,
             authorized: HashMap::new(),
+            settings_open: false,
+            self_fingerprint: None,
             auth_desc,
             port: 0,
             port_error: None,
@@ -243,7 +252,10 @@ impl Console {
             FeedEvent::Connected(writer) => {
                 self.feed = FeedState::Connected;
                 self.writer = Some(writer);
-                self.request(FrontendRequest::Enumerate());
+                // `Sync` is a superset of `Enumerate`: it also pushes
+                // the statuses, the port and this device's key
+                // fingerprint the settings overlay shows.
+                self.request(FrontendRequest::Sync);
             }
             FeedEvent::Disconnected(reason) => {
                 self.feed = FeedState::Disconnected(reason.map(SharedString::from));
@@ -255,6 +267,8 @@ impl Console {
                 self.retrying = None;
                 self.authorized.clear();
                 self.awaiting_auth.clear();
+                self.settings_open = false;
+                self.self_fingerprint = None;
             }
             FeedEvent::Daemon(event) => self.apply_daemon_event(*event, cx),
         }
@@ -301,6 +315,7 @@ impl Console {
             }
             FrontendEvent::CaptureStatus(status) => self.capture = status,
             FrontendEvent::EmulationStatus(status) => self.emulation = status,
+            FrontendEvent::PublicKeyFingerprint(fp) => self.self_fingerprint = Some(fp),
             FrontendEvent::AuthorizedUpdated(keys) => {
                 // Once authorized the peer is past the gate; the badge
                 // reverts to connecting/offline until it dials through.
@@ -554,9 +569,15 @@ impl Console {
         h_flex()
             .flex_1()
             .min_h_0()
+            .relative()
             .items_stretch()
             .child(self.render_device_panel(visible, cx))
             .child(self.render_detail_panel(cx))
+            // The settings overlay covers the two-pane area but not the
+            // title bar (design v2.2's `inset: 38px 0 0 0`).
+            .when(self.settings_open, |main| {
+                main.child(self.render_settings_overlay(cx))
+            })
     }
 
     fn render_device_panel(
@@ -730,7 +751,10 @@ impl Console {
                     .icon(Icon::new(IconName::Settings))
                     .ghost()
                     .small()
-                    .disabled(true),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.settings_open = true;
+                        cx.notify();
+                    })),
             )
     }
 
