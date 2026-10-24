@@ -14,8 +14,8 @@
       "n": 1,
       "session_id": "adhoc",
       "started": "2026-10-23T01:27:18+08:00",
-      "ended": "2026-10-24T11:04:44+08:00",
-      "handoff": ".relay/journal/HANDOFF-014.md",
+      "ended": "2026-10-24T00:58:01+08:00",
+      "handoff": ".relay/journal/HANDOFF-012.md",
       "status": "done"
     },
     {
@@ -78,8 +78,8 @@
       "n": 9,
       "session_id": "session_9f5fc17b8ccedb5ae0382dbe81e4ed8a",
       "started": "2026-10-24T08:05:25+08:00",
-      "ended": "2026-10-24T09:05:19+08:00",
-      "handoff": ".relay/journal/HANDOFF-013.md",
+      "ended": "2026-10-24T11:04:44+08:00",
+      "handoff": ".relay/journal/HANDOFF-014.md",
       "status": "done"
     }
   ]
