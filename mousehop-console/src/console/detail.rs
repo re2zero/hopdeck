@@ -17,7 +17,7 @@ use gpui_kit::{
     },
     div,
 };
-use mousehop_ipc::{ClientHandle, ConnectMode, FrontendRequest, Position};
+use mousehop_ipc::{ClientHandle, ConnectMode, CrossingModifier, FrontendRequest, Position};
 use std::net::IpAddr;
 
 use super::{Console, DeviceEntry, EditDraft, position_label};
@@ -354,6 +354,8 @@ impl Console {
             .child(self.render_edit_field("端口", Input::new(&edit.port).small(), cx))
             .child(self.render_position_chips(edit, cx))
             .child(self.render_connect_mode_chips(edit, cx))
+            .child(self.render_kv_section("输入映射", cx))
+            .child(self.render_send_option_rows(edit, cx))
             .child(
                 h_flex()
                     .flex_wrap()
@@ -478,6 +480,95 @@ impl Console {
         row
     }
 
+    /// 输入映射 rows: send-side key-mapping options (the remaining D8-era
+    /// fields). Draft state like the chips above — applying on 保存 goes
+    /// through the daemon's live `SetClient*` handlers, so no reconnect
+    /// is needed for these.
+    fn render_send_option_rows(
+        &self,
+        edit: &EditDraft,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let entity = cx.entity();
+
+        let cmd_switch = {
+            let entity = entity.clone();
+            Switch::new("edit-command-as-ctrl")
+                .checked(edit.command_as_ctrl)
+                .on_click(move |checked, _, cx| {
+                    entity.update(cx, |this, _| {
+                        if let Some(edit) = this.edit.as_mut() {
+                            edit.command_as_ctrl = *checked;
+                        }
+                    });
+                })
+                .small()
+        };
+        let require_switch = {
+            let entity = entity.clone();
+            Switch::new("edit-require-crossing")
+                .checked(edit.require_crossing_modifier)
+                .on_click(move |checked, _, cx| {
+                    entity.update(cx, |this, _| {
+                        if let Some(edit) = this.edit.as_mut() {
+                            edit.require_crossing_modifier = *checked;
+                        }
+                    });
+                })
+                .small()
+        };
+
+        let mut col = v_flex()
+            .gap_1()
+            .child(super::settings::option_row(
+                "Command→Ctrl",
+                "仅 macOS 发送端：对端收到的 Command 键改按 Control 注入",
+                cmd_switch,
+                muted,
+            ))
+            .child(super::settings::option_row(
+                "跨越需按修饰键",
+                "开启后指针须按住所选修饰键才能进入该设备（默认靠边即切）",
+                require_switch,
+                muted,
+            ));
+        if edit.require_crossing_modifier {
+            let modifiers = [
+                ("edit-crossing-ctrl", CrossingModifier::Control, "Ctrl"),
+                ("edit-crossing-alt", CrossingModifier::Alt, "Alt"),
+                ("edit-crossing-shift", CrossingModifier::Shift, "Shift"),
+                ("edit-crossing-super", CrossingModifier::Super, "Super"),
+            ];
+            let mut row = h_flex().items_center().gap_2().child(
+                div()
+                    .w_16()
+                    .flex_shrink_0()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("修饰键"),
+            );
+            for (id, modifier, label) in modifiers {
+                let selected = edit.crossing_modifier == modifier;
+                row = row.child(
+                    Button::new(id)
+                        .label(label)
+                        .small()
+                        .when(selected, |b| b.primary())
+                        .when(!selected, |b| b.ghost())
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if let Some(edit) = this.edit.as_mut() {
+                                edit.crossing_modifier = modifier;
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            col = col.child(row);
+        }
+        col
+    }
+
     // ── actions ──────────────────────────────────────────────────────
 
     fn start_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -520,6 +611,9 @@ impl Console {
             port,
             pos: config.pos,
             connect_mode: config.connect_mode,
+            command_as_ctrl: config.command_as_ctrl,
+            require_crossing_modifier: config.require_crossing_modifier,
+            crossing_modifier: config.crossing_modifier,
         });
         cx.notify();
     }
@@ -596,6 +690,27 @@ impl Console {
             self.request(FrontendRequest::UpdateConnectMode(
                 handle,
                 edit.connect_mode,
+            ));
+            changed = true;
+        }
+        if old.command_as_ctrl != edit.command_as_ctrl {
+            self.request(FrontendRequest::SetClientCommandAsCtrl(
+                handle,
+                edit.command_as_ctrl,
+            ));
+            changed = true;
+        }
+        if old.require_crossing_modifier != edit.require_crossing_modifier {
+            self.request(FrontendRequest::SetClientRequireCrossingModifier(
+                handle,
+                edit.require_crossing_modifier,
+            ));
+            changed = true;
+        }
+        if old.crossing_modifier != edit.crossing_modifier {
+            self.request(FrontendRequest::SetClientCrossingModifier(
+                handle,
+                edit.crossing_modifier,
             ));
             changed = true;
         }

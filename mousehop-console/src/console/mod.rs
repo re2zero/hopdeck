@@ -42,8 +42,8 @@ use gpui_kit::{
 use self::layout::DeviceDrag;
 use self::logbar::{LogLevel, LogSink};
 use mousehop_ipc::{
-    ClientConfig, ClientHandle, ClientState, ConnectMode, DEFAULT_PORT, FrontendEvent,
-    FrontendRequest, IncomingPeerConfig, Position, Status,
+    ClientConfig, ClientHandle, ClientState, ConnectMode, CrossingModifier, DEFAULT_PORT,
+    FrontendEvent, FrontendRequest, IncomingPeerConfig, Position, Status,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -216,6 +216,9 @@ struct EditDraft {
     port: Entity<InputState>,
     pos: Position,
     connect_mode: ConnectMode,
+    command_as_ctrl: bool,
+    require_crossing_modifier: bool,
+    crossing_modifier: CrossingModifier,
 }
 
 impl Console {

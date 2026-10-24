@@ -13,7 +13,13 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     ClickEvent, Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Window,
-    component::{ActiveTheme, WindowExt, h_flex, notification::Notification, v_flex},
+    component::{
+        ActiveTheme, Sizable, WindowExt,
+        button::{Button, ButtonVariants},
+        h_flex,
+        notification::Notification,
+        v_flex,
+    },
     div,
 };
 use mousehop_ipc::{ClientHandle, FrontendRequest, Position};
@@ -213,6 +219,7 @@ impl Console {
         let handle = entry.handle;
         let pos = entry.config.pos;
         let online = entry.online();
+        let active = entry.state.active;
         let name = entry.name();
         let fg = if online {
             cx.theme().foreground
@@ -224,6 +231,10 @@ impl Console {
         let mut sub = entry.addr_label().to_string();
         if !online {
             sub.push_str(" · 离线");
+        }
+        // 移出布局 = 停用（D26①）：边缘不再触发，但槽位仍被该设备占用。
+        if !active {
+            sub.push_str(" · 已停用");
         }
 
         v_flex()
@@ -239,7 +250,7 @@ impl Console {
             .border_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
-            .when(!online, |box_| box_.opacity(0.6))
+            .when(!online || !active, |box_| box_.opacity(0.6))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.selected = Some(handle);
@@ -251,7 +262,85 @@ impl Console {
             }))
             .child(div().text_sm().text_color(fg).truncate().child(name))
             .child(div().text_xs().text_color(muted).truncate().child(sub))
-            .child(edge_bar(pos, cx.theme().success))
+            .child(edge_bar(
+                pos,
+                if active {
+                    cx.theme().success
+                } else {
+                    cx.theme().muted_foreground
+                },
+            ))
+            .child(self.render_slot_action(entry, cx))
+    }
+
+    /// The slot's corner action: 移出 on an active box (deactivate — the
+    /// daemon destroys its capture-side instance, so the edge stops
+    /// triggering), 放回 on a removed one (re-activate; the daemon
+    /// auto-displaces the other client on that side).
+    fn render_slot_action(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> impl IntoElement {
+        let handle = entry.handle;
+        let pos = entry.config.pos;
+        let active = entry.state.active;
+        let (label, id) = if active {
+            ("移出", ("layout-remove", handle))
+        } else {
+            ("放回", ("layout-restore", handle))
+        };
+
+        div().absolute().top_1().right_1().child(
+            Button::new(id)
+                .label(label)
+                .ghost()
+                .small()
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.set_slot_active(handle, pos, !active, window, cx);
+                })),
+        )
+    }
+
+    /// The slot button behind [`Self::render_slot_action`]: flip the
+    /// client's active state (公子拍板 D26①: removal IS deactivation).
+    fn set_slot_active(
+        &mut self,
+        handle: ClientHandle,
+        pos: Position,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.entry(handle) else {
+            return;
+        };
+        if entry.state.active == active {
+            return;
+        }
+        let name = entry.name();
+        self.request(FrontendRequest::Activate(handle, active));
+        if active {
+            self.journal(
+                super::logbar::LogLevel::Info,
+                format!("布局放回：「{name}」启用（{}屏）", position_label(pos)),
+            );
+            window.push_notification(
+                Notification::success(format!("「{name}」已放回{}屏", position_label(pos))),
+                cx,
+            );
+        } else {
+            self.journal(
+                super::logbar::LogLevel::Info,
+                format!(
+                    "布局移出：「{name}」停用，{}屏不再触发",
+                    position_label(pos)
+                ),
+            );
+            window.push_notification(
+                Notification::info(format!(
+                    "「{name}」已移出布局（{}屏停用）",
+                    position_label(pos)
+                )),
+                cx,
+            );
+        }
     }
 
     fn render_host_box(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -295,6 +384,9 @@ impl Console {
             return;
         }
         let name = entry.name();
+        // Dragging a removed (deactivated) device to a slot re-enlists
+        // it: placement IS layout membership (D26①).
+        let was_active = entry.state.active;
         let occupants: Vec<SharedString> = self
             .clients
             .iter()
@@ -332,6 +424,9 @@ impl Console {
             }
             None => {
                 self.request(FrontendRequest::UpdatePosition(handle, pos));
+                if !was_active {
+                    self.request(FrontendRequest::Activate(handle, true));
+                }
                 self.journal(
                     super::logbar::LogLevel::Info,
                     format!("布局：{name} → {}屏", position_label(pos)),
