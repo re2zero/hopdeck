@@ -117,6 +117,7 @@ impl Capture {
         conn: MousehopConnection,
         release_bind: Vec<scancode::Linux>,
         release_threshold_px: u32,
+        video: crate::video::VideoPeer,
     ) -> Self {
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();
@@ -145,6 +146,7 @@ impl Capture {
             modeling_disabled_for: None,
             next_handover_serial: 0,
             peer_capabilities: Default::default(),
+            video,
             peer_pressed_keys: Default::default(),
             #[cfg(target_os = "macos")]
             user_activity: Default::default(),
@@ -615,6 +617,9 @@ struct CaptureTask {
     next_handover_serial: u32,
     /// Capabilities learned from each exact outbound Hello/session.
     peer_capabilities: HashMap<(CaptureHandle, ConnectionSession), u32>,
+    /// Video channel receiver (M3a). Inert without the `video` feature —
+    /// `handle_proto` becomes a no-op stub call.
+    video: crate::video::VideoPeer,
     /// Logical keys that were successfully sent down to the active peer.
     /// Local capture state can run ahead of the wire during the Ack gate or a
     /// failed send, so release cleanup must use this wire-visible set.
@@ -1103,15 +1108,18 @@ impl CaptureTask {
                     None => return Ok(()),
                 },
                 connection_event = self.conn.recv() => {
-                    let (handle, session, event, peer_ip) = match connection_event {
+                    let (handle, session, event, peer_ip, peer_addr) = match connection_event {
                         MousehopConnectionEvent::Received { handle, session, event, addr, .. } => {
-                            (handle, session, event, Some(addr.ip()))
+                            let peer_addr = addr;
+                            (handle, session, event, Some(addr.ip()), Some(peer_addr))
                         }
                         MousehopConnectionEvent::Disconnected { handle, session } => {
                             self.peer_capabilities.remove(&(handle, session));
                             self.pending_leaves.retain(|_, pending| {
                                 pending.handle != handle || pending.session != session
                             });
+                            // The peer's video offer died with its session.
+                            self.video.peer_gone(handle, session);
                             if self
                                 .modeling_disabled_for
                                 .is_some_and(|(peer, generation, _)| {
@@ -1137,6 +1145,11 @@ impl CaptureTask {
                                     | ProtoEvent::HostInputStateAck { .. }
                                     | ProtoEvent::HandoverLeave { .. }
                                     | ProtoEvent::HandoverLeaveAck { .. }
+                                    // Video offers ride session setup, which
+                                    // precedes activation; they must not be
+                                    // gated on the active client.
+                                    | ProtoEvent::VideoOffer { .. }
+                                    | ProtoEvent::VideoStop
                             )
                         {
                             // Capture events belong to the active client, but
@@ -1147,6 +1160,13 @@ impl CaptureTask {
                     }
 
                     match event {
+                        ProtoEvent::VideoOffer { .. } | ProtoEvent::VideoStop => {
+                            // v1 keeps a single video channel and the newest
+                            // offer wins; the console picture picker arrives
+                            // with increment ④.
+                            let addr = peer_addr.expect("video events always carry an addr");
+                            self.video.handle_proto(handle, session, addr, &event);
+                        }
                         ProtoEvent::Ack(serial) => {
                             let completed = self.state == State::WaitingForAck
                                 && self.active_client == Some(handle)
@@ -2209,6 +2229,10 @@ mod command_ctrl_tests {
             modeling_disabled_for: None,
             next_handover_serial: 0,
             peer_capabilities: Default::default(),
+            video: crate::video::VideoPeer::new(
+                webrtc_dtls::crypto::Certificate::generate_self_signed(vec!["ignored".to_owned()])
+                    .expect("test certificate"),
+            ),
             peer_pressed_keys: Default::default(),
             #[cfg(target_os = "macos")]
             user_activity: Default::default(),

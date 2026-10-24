@@ -312,6 +312,14 @@ pub(crate) enum EmulationRequest {
         session: ListenerSession,
         reply: oneshot::Sender<Option<Arc<dyn Conn + Send + Sync>>>,
     },
+    /// Video channel (M3a): send a protocol event (the `VideoOffer`)
+    /// to a current inbound session through the listener reply path.
+    /// Dropped silently when the session was replaced in the meantime.
+    AnnounceVideo {
+        addr: SocketAddr,
+        session: ListenerSession,
+        event: ProtoEvent,
+    },
     Terminate,
 }
 
@@ -359,6 +367,24 @@ impl Emulation {
     pub(crate) fn reenable(&self) {
         self.request_tx
             .send(EmulationRequest::Reenable)
+            .expect("channel closed");
+    }
+
+    /// Video channel (M3a): announce the video offer (or withdrawal) on an
+    /// inbound session. Fire-and-forget; the listen task checks session
+    /// currency before replying, so a replaced session never receives it.
+    pub(crate) fn announce_video(
+        &self,
+        addr: SocketAddr,
+        session: ListenerSession,
+        event: ProtoEvent,
+    ) {
+        self.request_tx
+            .send(EmulationRequest::AnnounceVideo {
+                addr,
+                session,
+                event,
+            })
             .expect("channel closed");
     }
 
@@ -1229,6 +1255,19 @@ impl ListenTask {
                             peer_capabilities.remove(&(addr, session));
                         }
                         let _ = reply.send(taken);
+                    }
+                    EmulationRequest::AnnounceVideo {
+                        addr,
+                        session,
+                        event,
+                    } => {
+                        if self.session_is_current(addr, session) {
+                            self.listener.reply(addr, session, event).await;
+                        } else {
+                            log::debug!(
+                                "dropping video announce for stale session {session} from {addr}"
+                            );
+                        }
                     }
                     EmulationRequest::Terminate => break,
                 },

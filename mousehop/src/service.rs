@@ -104,6 +104,9 @@ pub struct Service {
     incoming_conns: HashSet<SocketAddr>,
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
+    /// Video channel sender (M3a). Inert unless the `video` feature is
+    /// compiled and `[video] enabled = true` — `offer()` returns `None`.
+    video: crate::video::VideoHost,
     /// Startup snapshot of per-client tunnel forwards. The ipc
     /// `ClientConfig` doesn't carry them (no protocol change), so
     /// `save_config` re-attaches them from here; entries are dropped when
@@ -289,12 +292,27 @@ impl Service {
             );
         }
 
+        // Video channel (M3a). Bound before the first input session can be
+        // announced; a bind failure logs and disables video, never fatal.
+        let video_config = config.video();
+        if video_config.enabled && !cfg!(feature = "video") {
+            log::warn!(
+                "config [video] enabled = true, but this binary was built without the \
+                 `video` feature — screen sharing disabled"
+            );
+        }
+        let video =
+            crate::video::VideoHost::spawn(cert.clone(), authorized_keys.clone(), video_config)
+                .await;
+        let video_peer = crate::video::VideoPeer::new(cert.clone());
+
         let conn_for_service = conn.sender_clone();
         let capture = Capture::new(
             capture_backend,
             conn,
             config.release_bind(),
             config.release_threshold_px(),
+            video_peer,
         );
 
         // create dns resolver
@@ -363,6 +381,7 @@ impl Service {
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
+            video,
             tunnel_forwards: forward_specs,
             remote_host_states: Default::default(),
             next_trigger_handle: 0,
@@ -939,6 +958,11 @@ impl Service {
                 if let Some(addr) = self.remove_incoming(addr, session) {
                     self.notify_frontend(FrontendEvent::IncomingDisconnected(addr));
                 }
+                // An input session died: stop streaming to whoever held the
+                // video channel. Coarse by design (any disconnect halts all
+                // sends) — the next `Connected` re-announces and the peer
+                // re-dials, and v1 keeps a single video session anyway.
+                self.video.halt();
             }
             EmulationEvent::PortChanged(port) => match port {
                 Ok(port) => {
@@ -995,6 +1019,21 @@ impl Service {
                 }
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
                 self.maybe_adopt_reverse_session(addr, session).await;
+                // Video announce (M3a). Reverse-mode sessions offer no
+                // inbound path for the peer to dial our video port, so they
+                // stay silent — D34: v1 ships video for direct topology only.
+                if let Some(offer) = self.video.offer() {
+                    let reverse = self.client_manager.get_client(addr).is_some_and(|handle| {
+                        self.client_manager.connect_mode(handle) == ConnectMode::Reverse
+                    });
+                    if reverse {
+                        log::debug!(
+                            "video: skipping announce on reverse session {session} from {addr}"
+                        );
+                    } else {
+                        self.emulation.announce_video(addr, session, offer);
+                    }
+                }
             }
             EmulationEvent::PeerHello { addr, commit } => {
                 // Map the peer's source addr back to its client handle

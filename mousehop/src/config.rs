@@ -104,6 +104,50 @@ struct ConfigToml {
     /// absent means this machine neither accepts tunnel channels nor
     /// forwards anything. See `.relay/DESIGN-m2c-tunnel-forward.md`.
     tunnel: Option<TomlTunnel>,
+    /// Screen-sharing channel (M3a). Only honored by binaries built with
+    /// the `video` feature; elsewhere `enabled = true` logs a warning.
+    video: Option<TomlVideo>,
+}
+
+/// `[video]` — the screen-sharing channel this machine *sends* on
+/// (the controlled side captures and encodes; the controlling peer
+/// dials in and renders). See `.relay/DESIGN-m3a-video.md`.
+#[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq, Default)]
+pub struct TomlVideo {
+    /// Master switch. Default `false` — no video listener is bound and
+    /// no `VideoOffer` is announced.
+    enabled: Option<bool>,
+    /// UDP port of the video listener. `0` (default) binds an ephemeral
+    /// port announced dynamically via `VideoOffer`, so no fixed
+    /// firewall entry is needed.
+    port: Option<u16>,
+    /// Pattern/source geometry announced in `VideoOffer` (v1 sources are
+    /// config-driven; portal capture revisits this in increment ③).
+    width: Option<u16>,
+    height: Option<u16>,
+    max_fps: Option<u8>,
+}
+
+/// Resolved `[video]` configuration (defaults filled in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub width: u16,
+    pub height: u16,
+    pub max_fps: u8,
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 0,
+            width: 1280,
+            height: 720,
+            max_fps: 30,
+        }
+    }
 }
 
 /// `[tunnel]` — the exit side of the reverse tunnel.
@@ -175,6 +219,24 @@ impl ConfigToml {
     fn new(path: &Path) -> Result<ConfigToml, ConfigError> {
         let config = fs::read_to_string(path)?;
         Ok(toml::from_str::<_>(&config)?)
+    }
+
+    /// The resolved `[video]` configuration (defaults filled in).
+    fn video(&self) -> VideoConfig {
+        let Some(video) = self.video.as_ref() else {
+            return VideoConfig::default();
+        };
+        VideoConfig {
+            enabled: video.enabled.unwrap_or(false),
+            port: video.port.unwrap_or(0),
+            width: video.width.unwrap_or_else(|| VideoConfig::default().width),
+            height: video
+                .height
+                .unwrap_or_else(|| VideoConfig::default().height),
+            max_fps: video
+                .max_fps
+                .unwrap_or_else(|| VideoConfig::default().max_fps),
+        }
     }
 }
 
@@ -708,6 +770,15 @@ impl Config {
         Some(crate::tunnel::ExitConfig { listen, allow })
     }
 
+    /// The `[video]` screen-sharing configuration with defaults filled in.
+    /// Absent section = disabled with default geometry.
+    pub fn video(&self) -> VideoConfig {
+        self.config_toml
+            .as_ref()
+            .map(|c| c.video())
+            .unwrap_or_default()
+    }
+
     /// path to certificate
     pub fn cert_path(&self) -> &Path {
         &self.cert_path
@@ -1207,5 +1278,68 @@ target = "no-port-here"
             client.tunnel_forwards.is_empty(),
             "invalid entries are dropped, not fatal"
         );
+    }
+}
+
+#[cfg(test)]
+mod video_config_tests {
+    use super::*;
+
+    #[test]
+    fn video_section_resolves_with_defaults() {
+        let toml_source = r#"
+[video]
+enabled = true
+port = 4262
+"#;
+        let config: ConfigToml = toml::from_str(toml_source).expect("parse");
+        let resolved = config.video();
+        assert!(resolved.enabled);
+        assert_eq!(resolved.port, 4262);
+        // Geometry not given → defaults.
+        assert_eq!(resolved.width, 1280);
+        assert_eq!(resolved.height, 720);
+        assert_eq!(resolved.max_fps, 30);
+    }
+
+    #[test]
+    fn video_absent_section_defaults_to_disabled() {
+        let config: ConfigToml = toml::from_str("port = 4242").expect("parse");
+        let resolved = config.video();
+        assert!(!resolved.enabled);
+        assert_eq!(resolved.port, 0);
+    }
+
+    #[test]
+    fn video_round_trips_through_toml() {
+        let toml_source = r#"
+[video]
+enabled = true
+port = 0
+width = 320
+height = 180
+max_fps = 60
+"#;
+        let config: ConfigToml = toml::from_str(toml_source).expect("parse");
+        assert_eq!(
+            config.video(),
+            VideoConfig {
+                enabled: true,
+                port: 0,
+                width: 320,
+                height: 180,
+                max_fps: 60,
+            }
+        );
+
+        // Round trip: re-serializing keeps the section; untouched configs
+        // gain no [video] section at all.
+        let serialized = toml::to_string_pretty(&config).expect("serialize");
+        let reparsed: ConfigToml = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed.video(), config.video());
+
+        let plain: ConfigToml = toml::from_str("port = 4242").expect("parse");
+        let plain_serialized = toml::to_string_pretty(&plain).expect("serialize");
+        assert!(!plain_serialized.contains("[video]"));
     }
 }

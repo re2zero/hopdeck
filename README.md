@@ -676,6 +676,32 @@ Forwards are read at daemon startup; editing them requires a restart.
 Restrictions of the v1: TCP only (no UDP), no SOCKS-style dynamic
 forwarding, no transparent interception.
 
+### Screen Sharing (experimental)
+
+The controlled machine can stream its screen to the controlling peer over a
+dedicated UDP+DTLS channel (separate socket from input, same certificate and
+`authorized_fingerprints` table, H.264 baseline via OpenH264). The controlled
+side opts in with a `[video]` section:
+
+```toml
+[video]
+enabled = true
+# port = 0        # 0 (default) = ephemeral port, announced to the peer
+                   # dynamically — no fixed firewall entry needed
+# width = 1280     # announced geometry (v1: config-driven test-pattern
+# height = 720     # source; real display capture arrives with portal support)
+# max_fps = 30
+```
+
+When a session is established and video is enabled, the controlled machine
+announces the channel via a `VideoOffer` and the controller dials on demand;
+the offer is re-announced on every new session generation. v1 restrictions:
+direct topology only (a `reverse` session has no inbound path for the video
+dial), admission is strictly by `authorized_fingerprints` (an access password
+never admits a peer to the video channel — there is no protocol-level
+challenge on it to gate the stream), and viewing/rendering in the console
+frontend is not wired up yet.
+
 ## Detailed OS Support
 
 In order to use a device for sending events, an **input-capture** backend is required, while receiving events requires

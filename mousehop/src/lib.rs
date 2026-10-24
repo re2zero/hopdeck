@@ -23,5 +23,6 @@ mod network;
 pub mod panic_log;
 pub mod service;
 mod tunnel;
+mod video;
 #[cfg(windows)]
 pub mod windows_console;
