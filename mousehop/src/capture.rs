@@ -1380,6 +1380,7 @@ impl CaptureTask {
                             let Some(ip) = peer_ip else {
                                 continue;
                             };
+                            log::info!("auth challenge from client {handle}; prompting frontend");
                             self.event_tx
                                 .send(ICaptureEvent::PasswordRequired(ip))
                                 .expect("channel closed");

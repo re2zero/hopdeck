@@ -75,3 +75,26 @@ This ensures that
 - b) As soon as a virtual input enters another client, mousehop will stop receiving events,
 which ensures clients can only be controlled directly and not indirectly through other clients.
 
+## Access Password (Session Admission)
+
+Complementary to fingerprint authorization (`authorized_fingerprints`), a
+receiver can configure `access_password`. The gate lives at the protocol
+layer, after the DTLS handshake:
+
+1. `verify_peer_certificate` admits peers whose fingerprint is
+   unauthorized when a password is set (it is logged, never persisted).
+   Their listener `Accept` event is withheld.
+2. On the peer's `Hello`, the listener replies `AuthRequired{salt, nonce}`
+   (capability `CAP_ACCESS_PASSWORD`, bit 2, negotiated via Hello).
+3. The dialer answers `AuthPassword{proof}` with
+   `SHA-256(salt ‖ nonce ‖ password)`; the listener recomputes the proof
+   from its configured password and replies `AuthResult{ok}`.
+4. On success the withheld `Accept` is published and the rest of the
+   session flows through the unchanged handshake path; on failure the
+   connection is closed and the failure counted (3 per 30 s per address —
+   exceeded attempts are refused without a challenge).
+
+Wire impact: three fixed-size event tags appended (26–28);
+`MAX_EVENT_SIZE` raised to 33 bytes to fit the 32-byte auth payloads.
+Serialization of existing events is unchanged — no protocol version bump.
+

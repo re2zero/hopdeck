@@ -340,6 +340,32 @@ If the device still can not be entered, make sure you have UDP port `4252` (or t
 </details>
 
 <details>
+    <summary>Access Password</summary>
+
+Besides per-fingerprint authorization, the receiving device can set an
+`access_password` in its config file (see [Configuration](#configuration)).
+Devices whose fingerprint is **not** in `authorized_fingerprints` may then
+still connect, but must answer a per-session password challenge before any
+input is exchanged:
+
+- Fingerprint already authorized → connects as before; the password plays
+  no part.
+- Not authorized, password set → the connecting device is asked for the
+  password (GUI shows a dialog); a correct answer admits **this session
+  only** and never writes the fingerprint to the authorized table, so the
+  next connection asks again.
+- Not authorized, no password → the connection is refused as before.
+
+Wrong answers are rate-limited: after 3 failures within 30 seconds from
+the same address, further attempts are refused until the window expires.
+
+The challenge is `SHA-256(salt ‖ nonce ‖ password)` with a fresh
+per-session nonce — the password never crosses the wire and answers cannot
+be replayed. Note the v1 simplification: the password itself is stored in
+plain text in the config file, so protect that file.
+</details>
+
+<details>
     <summary>Command Line Interface</summary>
 
 The cli interface can be accessed by passing `cli` as a commandline argument.
@@ -408,6 +434,12 @@ release_bind = [ "KeyA", "KeyS", "KeyD", "KeyF" ]
 
 # optional port (defaults to 4252)
 port = 4252
+
+# optional access password for incoming sessions. When set, devices whose
+# fingerprint is not listed below may still connect, but must answer a
+# per-session password challenge before any input is exchanged. See
+# "Access Password" below.
+access_password = "share-with-care"
 
 # list of authorized tls certificate fingerprints that
 # are accepted for incoming traffic
