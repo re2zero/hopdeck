@@ -695,6 +695,11 @@ pub enum FrontendEvent {
     },
     /// failed connection attempt (approval for fingerprint required)
     ConnectionAttempt { fingerprint: String },
+    /// The daemon dialed a peer that requires the access password and is
+    /// waiting for the answer. The frontend collects the password and
+    /// replies via [`FrontendRequest::SubmitAccessPassword`]; the daemon
+    /// holds it in memory only (never persisted). `addr` is the peer's IP.
+    PasswordRequired { addr: IpAddr },
     /// pixel threshold for the wall-press auto-release fallback.
     /// 0 means disabled.
     ReleaseThreshold(u32),
@@ -783,6 +788,10 @@ pub enum FrontendRequest {
     AuthorizeKey(String, String),
     /// remove fingerprint (fingerprint)
     RemoveAuthorizedKey(String),
+    /// Answer a pending [`FrontendEvent::PasswordRequired`] challenge on
+    /// the outbound connection toward `addr`. Held in memory only; a
+    /// rejected password is dropped so the next attempt prompts again.
+    SubmitAccessPassword { addr: IpAddr, password: String },
     /// change the hook command
     UpdateEnterHook(u64, Option<String>),
     /// save config file

@@ -2,7 +2,7 @@
   "version": 1,
   "project": "deskgo-cross-device-collab",
   "created": "2026-10-22T22:18:59+08:00",
-  "updated": "2026-10-24T11:04:44+08:00",
+  "updated": "2026-10-24T11:28:00+08:00",
   "status": "active",
   "strict_stop": true,
   "auto_relay": false,
@@ -81,6 +81,14 @@
       "ended": "2026-10-24T11:04:44+08:00",
       "handoff": ".relay/journal/HANDOFF-014.md",
       "status": "done"
+    },
+    {
+      "n": 10,
+      "session_id": "session_e5a203f36bec84cc1ea4a96279b0815c",
+      "started": "2026-10-24T11:13:59+08:00",
+      "ended": null,
+      "handoff": null,
+      "status": "active"
     }
   ]
 }

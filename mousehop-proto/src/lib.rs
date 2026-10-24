@@ -10,12 +10,29 @@ use std::{
 };
 use thiserror::Error;
 
+/// Largest access-control frame: tag + 32 bytes of payload (salt+nonce
+/// challenge, or password proof).
+const MAX_AUTH_EVENT_SIZE: usize = 1 + 32;
+
 /// Defines the maximum size a fixed-buffer encoded event can take up.
 /// Clipboard and display-topology events use their dedicated variable-length
 /// codecs; every other event fits in this size. Transactional input adds a
-/// serial and an inner event tag to the largest legacy input frame.
-pub const MAX_EVENT_SIZE: usize =
-    size_of::<u8>() + size_of::<u32>() + size_of::<u8>() + size_of::<u32>() + 2 * size_of::<f64>();
+/// serial and an inner event tag to the largest legacy input frame;
+/// access-password frames add 32 bytes of salt/nonce/proof material.
+/// This bounds in-memory buffers only — the wire carries each frame at
+/// its canonical length.
+pub const MAX_EVENT_SIZE: usize = {
+    let legacy = size_of::<u8>()
+        + size_of::<u32>()
+        + size_of::<u8>()
+        + size_of::<u32>()
+        + 2 * size_of::<f64>();
+    if MAX_AUTH_EVENT_SIZE > legacy {
+        MAX_AUTH_EVENT_SIZE
+    } else {
+        legacy
+    }
+};
 
 /// Maximum total clipboard payload size on the wire (originator
 /// fingerprint + content + length prefixes). 4 KiB is conservative
@@ -72,8 +89,17 @@ pub const CAP_ATOMIC_HANDOVER: u32 = 1 << 0;
 /// was actually applied.
 pub const CAP_TRANSACTIONAL_HANDOVER: u32 = 1 << 1;
 
+/// Peer understands the session access-password challenge
+/// ([`ProtoEvent::AuthRequired`] / [`ProtoEvent::AuthPassword`] /
+/// [`ProtoEvent::AuthResult`]). Advertised by every current build; the
+/// listen side only challenges peers that present this bit, so an older
+/// unauthorized peer fails fast instead of hanging until its handshake
+/// budget runs out.
+pub const CAP_ACCESS_PASSWORD: u32 = 1 << 2;
+
 /// Capabilities implemented completely by this protocol build.
-pub const PROTOCOL_CAPABILITIES: u32 = CAP_ATOMIC_HANDOVER | CAP_TRANSACTIONAL_HANDOVER;
+pub const PROTOCOL_CAPABILITIES: u32 =
+    CAP_ATOMIC_HANDOVER | CAP_TRANSACTIONAL_HANDOVER | CAP_ACCESS_PASSWORD;
 
 /// error type for protocol violations
 #[derive(Debug, Error)]
@@ -319,6 +345,22 @@ pub enum ProtoEvent {
     /// watchdog released held keys). The sender must release an exactly
     /// matching active capture instead of continuing to send into a void.
     OwnershipLost { serial: u32 },
+    /// Session access-password challenge, sent by the listen side before
+    /// echoing a `Hello` to an unauthorized peer (only when an access
+    /// password is configured). `salt`/`nonce` are random per challenge;
+    /// the dialer answers [`ProtoEvent::AuthPassword`] with
+    /// `SHA-256(salt || nonce || password)`, so neither the password nor a
+    /// replayable proof crosses the wire. The listen side must have
+    /// advertised [`CAP_ACCESS_PASSWORD`].
+    AuthRequired { salt: [u8; 16], nonce: [u8; 16] },
+    /// Dialer's answer to [`ProtoEvent::AuthRequired`]. The listen side
+    /// recomputes the proof from its configured password and replies
+    /// [`ProtoEvent::AuthResult`].
+    AuthPassword { proof: [u8; 32] },
+    /// Verdict of the access-password challenge. `ok: false` is followed by
+    /// a connection close; repeated failures are rate-limited by the listen
+    /// side.
+    AuthResult { ok: bool },
 }
 
 impl Display for ProtoEvent {
@@ -414,6 +456,13 @@ impl Display for ProtoEvent {
                 write!(f, "HandoverLeaveAck({serial})")
             }
             ProtoEvent::OwnershipLost { serial } => write!(f, "OwnershipLost({serial})"),
+            // Opaque on purpose: the Display output lands in logs and must
+            // never carry challenge material or proof bytes.
+            ProtoEvent::AuthRequired { .. } => write!(f, "AuthRequired(challenge)"),
+            ProtoEvent::AuthPassword { .. } => write!(f, "AuthPassword(proof)"),
+            ProtoEvent::AuthResult { ok } => {
+                write!(f, "AuthResult({})", if *ok { "ok" } else { "denied" })
+            }
         }
     }
 }
@@ -462,6 +511,13 @@ pub enum EventType {
     HandoverLeaveAck,
     /// Receiver reports that a handover serial no longer owns input.
     OwnershipLost,
+    /// Session access-password challenge. Appended so all legacy tags remain
+    /// wire-stable.
+    AuthRequired,
+    /// Answer to [`EventType::AuthRequired`].
+    AuthPassword,
+    /// Verdict for [`EventType::AuthPassword`].
+    AuthResult,
 }
 
 fn input_event_wire_len(event_type: EventType) -> Option<usize> {
@@ -579,6 +635,9 @@ impl ProtoEvent {
             ProtoEvent::HandoverLeave { .. } => EventType::HandoverLeave,
             ProtoEvent::HandoverLeaveAck { .. } => EventType::HandoverLeaveAck,
             ProtoEvent::OwnershipLost { .. } => EventType::OwnershipLost,
+            ProtoEvent::AuthRequired { .. } => EventType::AuthRequired,
+            ProtoEvent::AuthPassword { .. } => EventType::AuthPassword,
+            ProtoEvent::AuthResult { .. } => EventType::AuthResult,
         }
     }
 }
@@ -691,6 +750,27 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
             EventType::OwnershipLost => Ok(Self::OwnershipLost {
                 serial: decode_nonzero_handover_serial(&mut buf)?,
             }),
+            EventType::AuthRequired => {
+                let mut salt = [0u8; 16];
+                for b in salt.iter_mut() {
+                    *b = decode_u8(&mut buf)?;
+                }
+                let mut nonce = [0u8; 16];
+                for b in nonce.iter_mut() {
+                    *b = decode_u8(&mut buf)?;
+                }
+                Ok(Self::AuthRequired { salt, nonce })
+            }
+            EventType::AuthPassword => {
+                let mut proof = [0u8; 32];
+                for b in proof.iter_mut() {
+                    *b = decode_u8(&mut buf)?;
+                }
+                Ok(Self::AuthPassword { proof })
+            }
+            EventType::AuthResult => Ok(Self::AuthResult {
+                ok: decode_u8(&mut buf)? != 0,
+            }),
         }
     }
 }
@@ -738,6 +818,9 @@ pub fn decode_fixed_event(bytes: &[u8]) -> Result<ProtoEvent, ProtocolError> {
         EventType::HandoverAck => (bytes.len() == 6, "6 bytes"),
         EventType::HandoverLeave => (bytes.len() == 9, "9 bytes"),
         EventType::HandoverLeaveAck | EventType::OwnershipLost => (bytes.len() == 5, "5 bytes"),
+        EventType::AuthRequired => (bytes.len() == 33, "33 bytes"),
+        EventType::AuthPassword => (bytes.len() == 33, "33 bytes"),
+        EventType::AuthResult => (bytes.len() == 2, "2 bytes"),
         EventType::Clipboard | EventType::DisplayLayout => {
             (false, "a dedicated variable-length frame")
         }
@@ -902,6 +985,20 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                 ProtoEvent::HandoverLeaveAck { serial } | ProtoEvent::OwnershipLost { serial } => {
                     encode_u32(buf, len, serial)
                 }
+                ProtoEvent::AuthRequired { salt, nonce } => {
+                    for b in salt.iter() {
+                        encode_u8(buf, len, *b);
+                    }
+                    for b in nonce.iter() {
+                        encode_u8(buf, len, *b);
+                    }
+                }
+                ProtoEvent::AuthPassword { proof } => {
+                    for b in proof.iter() {
+                        encode_u8(buf, len, *b);
+                    }
+                }
+                ProtoEvent::AuthResult { ok } => encode_u8(buf, len, ok as u8),
             }
         }
         (buf, len)
@@ -1387,6 +1484,80 @@ mod tests {
         assert!(matches!(
             decode_fixed_event(&invalid[..len]),
             Err(ProtocolError::InvalidHandoverWarpStatus(_))
+        ));
+    }
+
+    #[test]
+    fn access_password_frames_round_trip_without_moving_legacy_tags() {
+        assert_eq!(EventType::AuthRequired as u8, 26);
+        assert_eq!(EventType::AuthPassword as u8, 27);
+        assert_eq!(EventType::AuthResult as u8, 28);
+
+        let salt = [0xa5u8; 16];
+        let nonce = [0x5au8; 16];
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) =
+            ProtoEvent::AuthRequired { salt, nonce }.into();
+        assert_eq!(len, 33);
+        assert!(matches!(
+            decode_fixed_event(&buf[..len]).expect("decode AuthRequired"),
+            ProtoEvent::AuthRequired {
+                salt: decoded_salt,
+                nonce: decoded_nonce,
+            } if decoded_salt == salt && decoded_nonce == nonce
+        ));
+
+        let proof = [0x7eu8; 32];
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::AuthPassword { proof }.into();
+        assert_eq!(len, 33);
+        assert!(matches!(
+            decode_fixed_event(&buf[..len]).expect("decode AuthPassword"),
+            ProtoEvent::AuthPassword { proof: decoded } if decoded == proof
+        ));
+
+        for ok in [true, false] {
+            let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::AuthResult { ok }.into();
+            assert_eq!(len, 2);
+            assert!(matches!(
+                decode_fixed_event(&buf[..len]).expect("decode AuthResult"),
+                ProtoEvent::AuthResult { ok: decoded } if decoded == ok
+            ));
+        }
+    }
+
+    #[test]
+    fn access_password_frames_reject_truncated_and_overlong() {
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::AuthRequired {
+            salt: [0; 16],
+            nonce: [0; 16],
+        }
+        .into();
+        assert!(matches!(
+            decode_fixed_event(&buf[..len - 1]),
+            Err(ProtocolError::InvalidEventLength {
+                event_type: EventType::AuthRequired,
+                actual: 32,
+                ..
+            })
+        ));
+        let mut overlong = buf[..len].to_vec();
+        overlong.push(0);
+        assert!(matches!(
+            decode_fixed_event(&overlong),
+            Err(ProtocolError::InvalidEventLength {
+                event_type: EventType::AuthRequired,
+                actual: 34,
+                ..
+            })
+        ));
+
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::AuthResult { ok: true }.into();
+        assert!(matches!(
+            decode_fixed_event(&buf[..len + 1]),
+            Err(ProtocolError::InvalidEventLength {
+                event_type: EventType::AuthResult,
+                actual: 3,
+                ..
+            })
         ));
     }
 

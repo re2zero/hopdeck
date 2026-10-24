@@ -5066,6 +5066,7 @@ dependencies = [
  "core-graphics 0.25.0",
  "env_logger",
  "futures",
+ "getrandom 0.3.4",
  "hostname",
  "if-addrs 0.13.4",
  "if-watch",

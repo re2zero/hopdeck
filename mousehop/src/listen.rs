@@ -2,9 +2,9 @@ use futures::{Stream, StreamExt};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use mousehop_ipc::IncomingPeerConfig;
 use mousehop_proto::{
-    MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, ProtoEvent, decode_clipboard_event,
-    decode_display_layout_event, decode_fixed_event, encode_clipboard_event,
-    encode_display_layout_event,
+    CAP_ACCESS_PASSWORD, MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, ProtoEvent,
+    decode_clipboard_event, decode_display_layout_event, decode_fixed_event,
+    encode_clipboard_event, encode_display_layout_event,
 };
 use rustls::pki_types::CertificateDer;
 use std::{
@@ -13,7 +13,7 @@ use std::{
     net::{IpAddr, SocketAddr},
     rc::Rc,
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use thiserror::Error;
 use tokio::time::MissedTickBehavior;
@@ -30,6 +30,86 @@ use webrtc_dtls::{
 use webrtc_util::{Conn, Error, conn::Listener};
 
 use crate::{connect::handshake_allows_event, crypto};
+
+/// Failed access-password attempts allowed per peer IP inside
+/// [`AUTH_FAILURE_WINDOW`] before challenges are refused outright.
+const MAX_AUTH_FAILURES: usize = 3;
+/// Sliding window for the access-password failure counter.
+const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(30);
+/// How long a peer may take to answer an open password challenge — manual
+/// password entry on the dialing side — before the connection is closed.
+const AUTH_CHALLENGE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Idle-recv grace while a challenge is open (the peer stays silent until
+/// the user submits the password; a normal `RECV_IDLE_TIMEOUT` would kill
+/// the connection mid-entry).
+const AUTH_CHALLENGE_IDLE: Duration = Duration::from_secs(150);
+
+/// Session access-password gate for peers whose fingerprint is not in the
+/// authorized table. When an access password is configured, such peers pass
+/// the DTLS layer (their fingerprint is logged) but their `Accept` event is
+/// withheld and the protocol-level challenge in `read_loop` must pass
+/// before the session is surfaced above the listener. Authorized
+/// fingerprints bypass the gate entirely; the authorized table itself is
+/// never written by a password success (session-level admission only).
+#[derive(Clone)]
+struct AuthGate {
+    /// Configured access password; `None` disables password auth.
+    password: Arc<RwLock<Option<String>>>,
+    authorized_keys: Arc<RwLock<HashMap<String, IncomingPeerConfig>>>,
+    /// Recent failed proof attempts per peer IP for rate limiting.
+    failures: Rc<Mutex<HashMap<IpAddr, VecDeque<Instant>>>>,
+}
+
+impl AuthGate {
+    fn enabled(&self) -> bool {
+        self.password.read().expect("lock").is_some()
+    }
+
+    /// True when this fingerprint must answer the challenge: password auth
+    /// on, fingerprint not persistently authorized.
+    fn needs_challenge(&self, fingerprint: &str) -> bool {
+        self.enabled()
+            && !self
+                .authorized_keys
+                .read()
+                .expect("lock")
+                .contains_key(fingerprint)
+    }
+
+    fn password(&self) -> Option<String> {
+        self.password.read().expect("lock").clone()
+    }
+
+    fn is_rate_limited(&self, ip: IpAddr) -> bool {
+        let mut failures = self.failures.lock().expect("lock");
+        let Some(recent) = failures.get_mut(&ip) else {
+            return false;
+        };
+        let cutoff = Instant::now() - AUTH_FAILURE_WINDOW;
+        recent.retain(|at| *at > cutoff);
+        recent.len() >= MAX_AUTH_FAILURES
+    }
+
+    fn record_failure(&self, ip: IpAddr) {
+        let mut failures = self.failures.lock().expect("lock");
+        let recent = failures.entry(ip).or_default();
+        let cutoff = Instant::now() - AUTH_FAILURE_WINDOW;
+        recent.retain(|at| *at > cutoff);
+        recent.push_back(Instant::now());
+    }
+
+    fn clear_failures(&self, ip: IpAddr) {
+        self.failures.lock().expect("lock").remove(&ip);
+    }
+}
+
+/// Random bytes for challenge material. Failure to gather entropy is a
+/// process-fatal condition; panicking inside the read task takes the
+/// session down with a clear message instead of admitting the peer with a
+/// predictable challenge.
+fn random_bytes(buf: &mut [u8]) {
+    getrandom::fill(buf).expect("OS entropy source");
+}
 
 #[derive(Error, Debug)]
 pub enum ListenerCreationError {
@@ -109,6 +189,8 @@ pub(crate) struct MousehopListener {
     sessions: ListenerSessions,
     request_port_change: Sender<u16>,
     port_changed: Receiver<Result<u16, ListenerCreationError>>,
+    /// Session access-password gate shared with every accept/read task.
+    auth_gate: AuthGate,
     /// macOS-only: held for its `Drop` side effect (stops the
     /// CFRunLoop in the power-observer thread). The observer sends
     /// `()` into the wake channel on system-wake; the supervisor
@@ -148,13 +230,21 @@ impl MousehopListener {
         port: u16,
         cert: Certificate,
         authorized_keys: Arc<RwLock<HashMap<String, IncomingPeerConfig>>>,
+        access_password: Arc<RwLock<Option<String>>>,
     ) -> Result<Self, ListenerCreationError> {
         let (listen_tx, listen_rx) = channel();
         let (request_port_change, request_port_change_rx) = channel();
         let (port_changed_tx, port_changed) = channel();
         let connection_attempts: Arc<Mutex<VecDeque<String>>> = Default::default();
 
+        let auth_gate = AuthGate {
+            password: access_password.clone(),
+            authorized_keys: authorized_keys.clone(),
+            failures: Default::default(),
+        };
+
         let authorized = authorized_keys.clone();
+        let verify_password = access_password.clone();
         let verify_peer_certificate: Option<VerifyPeerCertificateFn> = {
             let connection_attempts = connection_attempts.clone();
             Some(Arc::new(
@@ -169,15 +259,26 @@ impl MousehopListener {
                         .expect("lock")
                         .contains_key(&fingerprints[0])
                     {
-                        Ok(())
-                    } else {
-                        let fingerprint = fingerprints.into_iter().next().expect("fingerprint");
-                        connection_attempts
-                            .lock()
-                            .expect("lock")
-                            .push_back(fingerprint);
-                        Err(webrtc_dtls::Error::ErrVerifyDataMismatch)
+                        return Ok(());
                     }
+                    let fingerprint = fingerprints.into_iter().next().expect("fingerprint");
+                    // With an access password configured, unauthorized peers
+                    // are let through the DTLS layer — the protocol-level
+                    // challenge in `read_loop` gates the session instead. The
+                    // fingerprint is logged so the operator can identify the
+                    // caller; it never enters the authorized table here.
+                    if verify_password.read().expect("lock").is_some() {
+                        log::info!(
+                            "access-password mode: admitted unauthorized peer {fingerprint} \
+                             at the DTLS layer; protocol challenge follows"
+                        );
+                        return Ok(());
+                    }
+                    connection_attempts
+                        .lock()
+                        .expect("lock")
+                        .push_back(fingerprint);
+                    Err(webrtc_dtls::Error::ErrVerifyDataMismatch)
                 },
             ))
         };
@@ -219,6 +320,7 @@ impl MousehopListener {
                         conns.clone(),
                         sessions.clone(),
                         connection_attempts.clone(),
+                        auth_gate.clone(),
                     );
                     listeners.insert(*ip, ListenerSlot { accept_task: task });
                     bound_count += 1;
@@ -239,6 +341,7 @@ impl MousehopListener {
                         conns.clone(),
                         sessions.clone(),
                         connection_attempts.clone(),
+                        auth_gate.clone(),
                     );
                     listeners.insert(fallback, ListenerSlot { accept_task: task });
                     log::info!(
@@ -269,6 +372,7 @@ impl MousehopListener {
             conns.clone(),
             sessions.clone(),
             connection_attempts,
+            auth_gate.clone(),
             request_port_change_rx,
             port_changed_tx,
             wake_rx,
@@ -282,6 +386,7 @@ impl MousehopListener {
             listen_task,
             port_changed,
             request_port_change,
+            auth_gate,
             #[cfg(target_os = "macos")]
             power_observer,
         })
@@ -314,6 +419,7 @@ impl MousehopListener {
             &self.sessions,
             peer_addr,
             &conn,
+            &self.auth_gate,
         )
         .await;
     }
@@ -510,16 +616,19 @@ async fn try_bind_listener(
 
 /// Spawn an accept loop for one bound listener. Each accepted
 /// `(conn, addr)` is registered in the shared `conns` vec and an
-/// `Accept` event is published. Verify-peer-certificate failures are
+/// `Accept` event is published (withheld while the access-password
+/// challenge is pending). Verify-peer-certificate failures are
 /// re-published as `Rejected` so the UI can surface unauthorized
 /// fingerprints. The accept loop exits when the listener errors
 /// out or its task is aborted (interface went down, port changed).
+#[allow(clippy::too_many_arguments)]
 fn spawn_accept_task(
     listener: DynListener,
     listen_tx: Sender<ListenEvent>,
     conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
     sessions: ListenerSessions,
     connection_attempts: Arc<Mutex<VecDeque<String>>>,
+    auth_gate: AuthGate,
 ) -> JoinHandle<()> {
     spawn_local(async move {
         loop {
@@ -529,7 +638,15 @@ fn spawn_accept_task(
                 _ = sleep => continue,
                 c = listener.accept() => match c {
                     Ok((conn, addr)) => {
-                        register_accepted_conn(&listen_tx, &conns, &sessions, addr, &conn).await;
+                        register_accepted_conn(
+                            &listen_tx,
+                            &conns,
+                            &sessions,
+                            addr,
+                            &conn,
+                            &auth_gate,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         if let Error::Std(ref se) = e {
@@ -563,13 +680,16 @@ fn spawn_accept_task(
 /// connection, used by both the listener accept loop and
 /// [`MousehopListener::adopt`] (reverse-dialed transports). Allocates
 /// the session generation, replaces any prior connection from the
-/// same peer address, publishes `Accept`, and starts the read loop.
+/// same peer address, publishes `Accept` — unless the peer owes the
+/// access-password challenge, in which case the accept is withheld
+/// until `read_loop` verifies it — and starts the read loop.
 async fn register_accepted_conn(
     listen_tx: &Sender<ListenEvent>,
     conns: &Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
     sessions: &ListenerSessions,
     addr: SocketAddr,
     conn: &ArcConn,
+    auth_gate: &AuthGate,
 ) {
     log::info!("dtls client connected, ip: {addr}");
     let session = sessions.allocate(addr);
@@ -594,13 +714,20 @@ async fn register_accepted_conn(
     let certs = dtls_conn.connection_state().await.peer_certificates;
     let cert = certs.first().expect("cert");
     let fingerprint = crypto::generate_fingerprint(cert);
-    listen_tx
-        .send(ListenEvent::Accept {
-            addr,
-            session,
-            fingerprint,
-        })
-        .expect("channel closed");
+    if auth_gate.needs_challenge(&fingerprint) {
+        log::info!(
+            "withholding session for {addr} (unauthorized peer {fingerprint}) \
+             pending the access-password challenge"
+        );
+    } else {
+        listen_tx
+            .send(ListenEvent::Accept {
+                addr,
+                session,
+                fingerprint: fingerprint.clone(),
+            })
+            .expect("channel closed");
+    }
     spawn_local(read_loop(
         conns.clone(),
         sessions.clone(),
@@ -608,6 +735,8 @@ async fn register_accepted_conn(
         session,
         conn.clone(),
         listen_tx.clone(),
+        fingerprint,
+        auth_gate.clone(),
     ));
 }
 
@@ -625,6 +754,7 @@ fn spawn_supervisor_task(
     conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
     sessions: ListenerSessions,
     connection_attempts: Arc<Mutex<VecDeque<String>>>,
+    auth_gate: AuthGate,
     mut request_port_change_rx: Receiver<u16>,
     port_changed_tx: Sender<Result<u16, ListenerCreationError>>,
     mut wake_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
@@ -694,6 +824,7 @@ fn spawn_supervisor_task(
                                         conns.clone(),
                                         sessions.clone(),
                                         connection_attempts.clone(),
+                                        auth_gate.clone(),
                                     );
                                     slot.insert(ListenerSlot { accept_task: task });
                                     log::info!(
@@ -725,6 +856,7 @@ fn spawn_supervisor_task(
                                         conns.clone(),
                                         sessions.clone(),
                                         connection_attempts.clone(),
+                                        auth_gate.clone(),
                                     );
                                     listeners.insert(ip, ListenerSlot { accept_task: task });
                                     log::info!("interface up: now listening on {ip}:{port}");
@@ -792,6 +924,7 @@ fn spawn_supervisor_task(
                                     conns.clone(),
                                     sessions.clone(),
                                     connection_attempts.clone(),
+                                    auth_gate.clone(),
                                 );
                                 listeners.insert(*ip, ListenerSlot { accept_task: task });
                                 bound += 1;
@@ -828,6 +961,7 @@ fn spawn_supervisor_task(
 /// a dead connection.
 const RECV_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
 
+#[allow(clippy::too_many_arguments)]
 async fn read_loop(
     conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
     sessions: ListenerSessions,
@@ -835,11 +969,19 @@ async fn read_loop(
     session: ListenerSession,
     conn: ArcConn,
     dtls_tx: Sender<ListenEvent>,
+    fingerprint: String,
+    auth_gate: AuthGate,
 ) -> Result<(), Error> {
     // Buffer sized for the largest legal variable-length frame; fixed
     // mouse/keyboard datagrams use only the first MAX_EVENT_SIZE bytes and
     // topology remains below the clipboard cap.
     let mut b = [0u8; MAX_CLIPBOARD_SIZE];
+
+    // Per-connection watchdog deadline. An open access-password challenge
+    // extends it (see below); the cell lives here, not on the shared gate,
+    // so one peer's challenge can't stretch another peer's handshake
+    // window.
+    let deadline = Rc::new(Cell::new(Instant::now() + HELLO_TIMEOUT));
 
     // Handshake gate: the peer must present a `Hello` carrying
     // `PROTOCOL_MAGIC` within `HELLO_TIMEOUT`. `hello_watchdog`
@@ -855,16 +997,29 @@ async fn read_loop(
         session,
         conn.clone(),
         hello_ok.clone(),
+        deadline.clone(),
     ));
 
+    // Access-password challenge state: while `Some`, the expected proof is
+    // pending and only `AuthPassword` is meaningful from the peer.
+    let mut expected_proof: Option<[u8; 32]> = None;
+    // Session-level admission: either the fingerprint is persistently
+    // authorized (no challenge) or the challenge passed on this transport.
+    let mut session_authorized = !auth_gate.needs_challenge(&fingerprint);
+
     loop {
-        let n = match tokio::time::timeout(RECV_IDLE_TIMEOUT, conn.recv(&mut b)).await {
+        // While a challenge is open the peer stays silent until the user
+        // submits the password — don't mistake that for a dead connection.
+        let idle = if expected_proof.is_some() {
+            AUTH_CHALLENGE_IDLE
+        } else {
+            RECV_IDLE_TIMEOUT
+        };
+        let n = match tokio::time::timeout(idle, conn.recv(&mut b)).await {
             Ok(Ok(n)) => n,
             Ok(Err(_)) => break,
             Err(_) => {
-                log::warn!(
-                    "{addr}: no datagram in {RECV_IDLE_TIMEOUT:?} — closing stale connection"
-                );
+                log::warn!("{addr}: no datagram in {idle:?} — closing stale connection");
                 let _ = conn.close().await;
                 break;
             }
@@ -893,6 +1048,53 @@ async fn read_loop(
                     );
                     break;
                 }
+                if !session_authorized {
+                    // Access-password challenge management. A duplicate
+                    // Hello while the challenge is open is a retransmission
+                    // racing the AuthRequired reply — ignore it.
+                    if expected_proof.is_some() {
+                        log::debug!(
+                            "ignoring duplicate Hello from {addr} while the \
+                             access-password challenge is open"
+                        );
+                        continue;
+                    }
+                    if capabilities & CAP_ACCESS_PASSWORD == 0 {
+                        log::warn!(
+                            "refusing {addr}: unauthorized peer does not support \
+                             access-password auth — closing connection"
+                        );
+                        let _ = conn.close().await;
+                        break;
+                    }
+                    if auth_gate.is_rate_limited(addr.ip()) {
+                        log::warn!(
+                            "refusing {addr}: too many failed access-password \
+                             attempts — cooling down"
+                        );
+                        let _ = conn.close().await;
+                        break;
+                    }
+                    let Some(password) = auth_gate.password() else {
+                        // Race: the password was removed between the DTLS
+                        // admission and the challenge; treat as unauthorized.
+                        log::warn!(
+                            "refusing {addr}: unauthorized peer without an \
+                             access password configured — closing connection"
+                        );
+                        let _ = conn.close().await;
+                        break;
+                    };
+                    let mut salt = [0u8; 16];
+                    let mut nonce = [0u8; 16];
+                    random_bytes(&mut salt);
+                    random_bytes(&mut nonce);
+                    expected_proof = Some(crypto::access_password_proof(&salt, &nonce, &password));
+                    deadline.set(Instant::now() + AUTH_CHALLENGE_TIMEOUT);
+                    log::info!("challenging {addr} for the access password");
+                    self_reply(&conn, ProtoEvent::AuthRequired { salt, nonce }).await;
+                    continue;
+                }
                 hello_ok.set(true);
                 dtls_tx
                     .send(ListenEvent::Msg {
@@ -905,6 +1107,49 @@ async fn read_loop(
                         session,
                     })
                     .expect("channel closed");
+            }
+            Some(ProtoEvent::AuthPassword { proof }) if expected_proof.is_some() => {
+                let expected = expected_proof.take().expect("checked above");
+                if auth_gate.is_rate_limited(addr.ip()) {
+                    log::warn!(
+                        "refusing {addr}: too many failed access-password \
+                         attempts — cooling down"
+                    );
+                    let _ = conn.close().await;
+                    break;
+                }
+                if proof == expected {
+                    log::info!("access password accepted for {addr}; session admitted");
+                    session_authorized = true;
+                    auth_gate.clear_failures(addr.ip());
+                    deadline.set(Instant::now() + HELLO_TIMEOUT);
+                    self_reply(&conn, ProtoEvent::AuthResult { ok: true }).await;
+                    // Publish the withheld Accept now — ahead of the peer's
+                    // next Hello retransmission, which flows through the
+                    // normal handshake path and completes the session.
+                    dtls_tx
+                        .send(ListenEvent::Accept {
+                            addr,
+                            session,
+                            fingerprint: fingerprint.clone(),
+                        })
+                        .expect("channel closed");
+                } else {
+                    auth_gate.record_failure(addr.ip());
+                    log::warn!("{addr} failed the access-password challenge — rejecting");
+                    self_reply(&conn, ProtoEvent::AuthResult { ok: false }).await;
+                    let _ = conn.close().await;
+                    break;
+                }
+            }
+            Some(ProtoEvent::AuthPassword { .. }) => {
+                log::debug!("ignoring unrequested AuthPassword from {addr}");
+            }
+            Some(ProtoEvent::AuthRequired { .. } | ProtoEvent::AuthResult { .. }) => {
+                // The listen side never accepts these from a peer; a
+                // pre-handshake sender would otherwise ride the extended
+                // handshake gate into the forwarding path.
+                log::debug!("ignoring out-of-place auth event from {addr}");
             }
             Some(event) => dtls_tx
                 .send(ListenEvent::Msg {
@@ -943,6 +1188,20 @@ async fn read_loop(
     Ok(())
 }
 
+/// Send one fixed-size protocol frame directly over an accepted DTLS
+/// transport. The normal reply path routes through the listener (which
+/// re-checks the session generation); the access-password exchange runs
+/// inside the connection's own read task, which already owns this exact
+/// session, so it replies on the held `ArcConn` instead.
+async fn self_reply(conn: &ArcConn, event: ProtoEvent) {
+    let display = format!("{event}");
+    let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = event.into();
+    log::trace!("auth reply {display} >=>=>=>=>=> {len} bytes");
+    if let Err(e) = conn.send(&buf[..len]).await {
+        log::debug!("auth reply send failed: {e}");
+    }
+}
+
 async fn accepted_connection_is_current(
     conns: &AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>,
     addr: SocketAddr,
@@ -974,27 +1233,38 @@ fn remove_connection_if_current(
 /// mousehop peer always flips `hello_ok` well before this fires.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(12);
 
-/// Close `conn` if `hello_ok` is still unset after [`HELLO_TIMEOUT`].
-/// Reaching the close path means the peer never spoke a valid
+/// Close `conn` if `hello_ok` is still unset once the shared deadline
+/// expires. Reaching the close path means the peer never spoke a valid
 /// mousehop handshake — the listen-side enforcement of the hard
 /// cut-over from lan-mouse. The timeout only fires while our
 /// generation still owns the address: a session handed over to the
 /// capture side (reverse adoption) has left the connection table, and
 /// its orphaned watchdog — which can never observe the handshake that
 /// the new owner processes — must stand down instead of killing the
-/// adopted transport.
+/// adopted transport. The deadline lives in a per-connection cell so an
+/// open access-password challenge (manual password entry on the peer)
+/// can extend it past the plain handshake window.
 async fn hello_watchdog(
     conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
     addr: SocketAddr,
     session: ListenerSession,
     conn: ArcConn,
     hello_ok: Rc<Cell<bool>>,
+    deadline: Rc<Cell<Instant>>,
 ) {
-    tokio::time::sleep(HELLO_TIMEOUT).await;
+    loop {
+        let now = Instant::now();
+        let deadline_at = deadline.get();
+        if now < deadline_at {
+            tokio::time::sleep(deadline_at - now).await;
+            continue;
+        }
+        break;
+    }
     if !hello_ok.get() && accepted_connection_is_current(&conns, addr, session).await {
         log::warn!(
             "refusing {addr}: peer did not complete the mousehop handshake \
-             within {HELLO_TIMEOUT:?} — closing connection"
+             within the window — closing connection"
         );
         let _ = conn.close().await;
     }
@@ -1093,6 +1363,11 @@ mod tests {
             sessions,
             request_port_change,
             port_changed,
+            auth_gate: AuthGate {
+                password: Arc::new(RwLock::new(None)),
+                authorized_keys: Arc::new(RwLock::new(HashMap::new())),
+                failures: Default::default(),
+            },
         };
 
         assert!(listener.take_conn(addr, stale).await.is_none());

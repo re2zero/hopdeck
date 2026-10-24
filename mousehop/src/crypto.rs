@@ -34,6 +34,19 @@ pub fn certificate_fingerprint(cert: &Certificate) -> String {
     generate_fingerprint(certificate)
 }
 
+/// Proof of knowledge of the access password for one session challenge:
+/// `SHA-256(salt || nonce || password)`. The listen side recomputes it
+/// from its configured password and compares; the per-challenge nonce
+/// makes the wire proof non-replayable and the password itself never
+/// crosses the wire.
+pub(crate) fn access_password_proof(salt: &[u8; 16], nonce: &[u8; 16], password: &str) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(salt);
+    hash.update(nonce);
+    hash.update(password.as_bytes());
+    hash.finalize().into()
+}
+
 /// load certificate from file
 pub fn load_certificate(path: &Path) -> Result<Certificate, Error> {
     let f = File::open(path)?;

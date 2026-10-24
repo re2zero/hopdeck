@@ -91,6 +91,9 @@ pub struct Console {
     /// dialog is opened from window-less contexts, so the input lives
     /// on the console).
     auth_desc: Entity<InputState>,
+    /// Reusable password input for the access-password dialog (same
+    /// window-less-context rationale as `auth_desc`).
+    auth_password: Entity<InputState>,
     port: u16,
     port_error: Option<SharedString>,
     capture: Status,
@@ -241,6 +244,7 @@ impl Console {
 
         let auth_desc =
             cx.new(|cx| InputState::new(window, cx).placeholder("备注名，如 书房笔记本"));
+        let auth_password = cx.new(|cx| InputState::new(window, cx).placeholder("访问密码"));
 
         let self_hostname = hostname::get()
             .map(|h| h.to_string_lossy().into_owned())
@@ -263,6 +267,7 @@ impl Console {
             settings_open: false,
             self_fingerprint: None,
             auth_desc,
+            auth_password,
             port: 0,
             port_error: None,
             capture: Status::default(),
@@ -417,6 +422,7 @@ impl Console {
                     .insert(fingerprint.clone(), std::time::Instant::now());
                 self.prompt_authorization(fingerprint, cx)
             }
+            FrontendEvent::PasswordRequired { addr } => self.prompt_access_password(addr, cx),
             FrontendEvent::DeviceConnected { fingerprint, .. } => {
                 self.awaiting_auth.remove(&fingerprint);
             }
@@ -476,6 +482,54 @@ impl Console {
                         };
                         if let Some(writer) = &writer {
                             writer.send(FrontendRequest::AuthorizeKey(desc, fingerprint.clone()));
+                        }
+                        true
+                    })
+                    .on_cancel(|_, _, _| true)
+            });
+        });
+    }
+
+    /// The peer we dialed wants the access password (session admission
+    /// for unauthorized devices on the receiving side). One dialog per
+    /// challenge — the daemon re-fires `PasswordRequired` only when a
+    /// fresh challenge is actually open, so no cooldown is needed here.
+    fn prompt_access_password(&mut self, addr: IpAddr, cx: &mut Context<Self>) {
+        if self.writer.is_none() {
+            return;
+        }
+        self.journal(
+            LogLevel::Info,
+            format!("访问密码：{addr} 需要密码（等待输入）"),
+        );
+        let writer = self.writer.clone();
+        let input = self.auth_password.clone();
+        let window = self.window;
+        let _ = window.update(cx, move |_, window, cx| {
+            if window.has_active_dialog(cx) {
+                return;
+            }
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let addr = addr;
+                let writer = writer.clone();
+                let input = input.clone();
+                alert
+                    .title("对方需要访问密码")
+                    .description(format!(
+                        "设备 {addr} 开启了访问密码。输入后本次会话放行；不落入对方的持久授权。"
+                    ))
+                    .child(Input::new(&input).small())
+                    .confirm()
+                    .ok_text("发送密码")
+                    .cancel_text("取消")
+                    .on_ok(move |_, _, cx| {
+                        let password = input.read(cx).value().to_string();
+                        if !password.is_empty() {
+                            if let Some(writer) = &writer {
+                                writer
+                                    .send(FrontendRequest::SubmitAccessPassword { addr, password });
+                            }
                         }
                         true
                     })

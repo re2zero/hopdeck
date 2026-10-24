@@ -1,5 +1,6 @@
 use crate::client::ClientManager;
 use crate::config::local_commit;
+use crate::crypto;
 use crate::discovery::{PrimaryCache, normalize_mdns_name};
 use crate::emulation::EmulationRequest;
 use input_event::{Event as InputEvent, KeyboardEvent};
@@ -112,10 +113,20 @@ pub(crate) enum MousehopConnectionEvent {
 }
 
 /// Before a DTLS peer proves it speaks Mousehop, only its protocol `Hello`
-/// may affect connection or input state. The caller still validates the
-/// hello's magic and rejects a foreign value.
+/// and the access-password exchange may affect connection or input state.
+/// The caller still validates the hello's magic and rejects a foreign
+/// value. The auth events must pass the gate precisely so the challenge
+/// can complete before the handshake does; every other event stays
+/// dropped until `hello_ok` flips.
 pub(crate) fn handshake_allows_event(hello_ok: bool, event: &ProtoEvent) -> bool {
-    hello_ok || matches!(event, ProtoEvent::Hello { .. })
+    hello_ok
+        || matches!(
+            event,
+            ProtoEvent::Hello { .. }
+                | ProtoEvent::AuthRequired { .. }
+                | ProtoEvent::AuthPassword { .. }
+                | ProtoEvent::AuthResult { .. }
+        )
 }
 
 /// Cleanup already committed to an exact transport generation must remain
@@ -330,6 +341,13 @@ pub(crate) struct MousehopConnection {
     /// event. Cleared on successful connect; bypassed automatically
     /// when the candidate-set signature changes.
     retry_state: Rc<RefCell<HashMap<ClientHandle, RetryState>>>,
+    /// Access-password answers submitted by the frontend, keyed by peer
+    /// IP. The receive loop consults it when the peer issues an
+    /// `AuthRequired` challenge; entries persist in memory only (never
+    /// persisted to disk) so a reconnect re-answers automatically, and a
+    /// rejected password is dropped so the next attempt prompts again.
+    /// A plain std mutex: only short, await-free lookups.
+    pending_passwords: Rc<std::sync::Mutex<HashMap<IpAddr, String>>>,
 }
 
 impl MousehopConnection {
@@ -353,7 +371,19 @@ impl MousehopConnection {
             primary_hints,
             reverse_adopt,
             retry_state: Default::default(),
+            pending_passwords: Default::default(),
         }
+    }
+
+    /// Store the access password the frontend collected for `ip`. Held in
+    /// memory only; the receive loop answers the next `AuthRequired` with
+    /// it. A later `AuthResult { ok: false }` drops the entry.
+    pub(crate) fn submit_access_password(&self, ip: IpAddr, password: String) {
+        log::debug!("access password submitted for {ip}");
+        self.pending_passwords
+            .lock()
+            .expect("lock")
+            .insert(ip, password);
     }
 
     pub(crate) async fn recv(&mut self) -> MousehopConnectionEvent {
@@ -414,6 +444,7 @@ impl MousehopConnection {
             primary_hints: self.primary_hints.clone(),
             reverse_adopt: self.reverse_adopt.clone(),
             retry_state: self.retry_state.clone(),
+            pending_passwords: self.pending_passwords.clone(),
         }
     }
 
@@ -528,6 +559,7 @@ impl MousehopConnection {
                 self.primary_hints.clone(),
                 self.reverse_adopt.clone(),
                 self.retry_state.clone(),
+                self.pending_passwords.clone(),
             ));
         }
         Err(MousehopConnectionError::NotConnected)
@@ -717,7 +749,13 @@ impl MousehopConnection {
         }
 
         let hello_ok = Rc::new(Cell::new(false));
-        spawn_local(hello_handshake(addr, conn.clone(), hello_ok.clone()));
+        let auth_pending = Rc::new(Cell::new(false));
+        spawn_local(hello_handshake(
+            addr,
+            conn.clone(),
+            hello_ok.clone(),
+            auth_pending.clone(),
+        ));
 
         spawn_local(ping_pong(
             self.client_manager.clone(),
@@ -730,6 +768,7 @@ impl MousehopConnection {
             self.recv_tx.clone(),
             self.ping_response.clone(),
             self.ping_sent_at.clone(),
+            auth_pending.clone(),
         ));
 
         spawn_local(receive_loop(
@@ -744,6 +783,8 @@ impl MousehopConnection {
             self.ping_response.clone(),
             self.ping_sent_at.clone(),
             hello_ok,
+            self.pending_passwords.clone(),
+            auth_pending,
         ));
     }
 
@@ -813,6 +854,7 @@ async fn connect_to_handle(
     primary_hints: PrimaryCache,
     reverse_adopt: Option<Sender<EmulationRequest>>,
     retry_state: Rc<RefCell<HashMap<ClientHandle, RetryState>>>,
+    pending_passwords: Rc<std::sync::Mutex<HashMap<IpAddr, String>>>,
 ) -> Result<(), MousehopConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
@@ -994,8 +1036,16 @@ async fn connect_to_handle(
         // lan-mouse. `receive_loop` flips `hello_ok` once the peer's
         // echoed Hello validates; `hello_handshake` retransmits until
         // then and tears the connection down if the window elapses.
+        // An access-password challenge (peer's `AuthRequired`) suspends
+        // the window while the user answers it.
         let hello_ok = Rc::new(Cell::new(false));
-        spawn_local(hello_handshake(addr, conn.clone(), hello_ok.clone()));
+        let auth_pending = Rc::new(Cell::new(false));
+        spawn_local(hello_handshake(
+            addr,
+            conn.clone(),
+            hello_ok.clone(),
+            auth_pending.clone(),
+        ));
 
         // poll connection for active
         spawn_local(ping_pong(
@@ -1009,6 +1059,7 @@ async fn connect_to_handle(
             tx.clone(),
             ping_response.clone(),
             ping_sent_at.clone(),
+            auth_pending.clone(),
         ));
 
         // receiver
@@ -1024,6 +1075,8 @@ async fn connect_to_handle(
             ping_response.clone(),
             ping_sent_at,
             hello_ok,
+            pending_passwords,
+            auth_pending,
         ));
         return Ok(());
     }
@@ -1040,6 +1093,17 @@ async fn connect_to_handle(
 const HELLO_MAX_ATTEMPTS: u32 = 8;
 const HELLO_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 
+/// Hard ceiling on the whole handshake while an access-password challenge
+/// is open (manual password entry) — past it the connection is closed even
+/// if the challenge is technically still pending. Covers the dialing
+/// side's password wait ([`AUTH_PASSWORD_WAIT`]) plus slack.
+const HELLO_TOTAL_DEADLINE: Duration = Duration::from_secs(150);
+
+/// How long the frontend may take to submit the access password after the
+/// peer issued its challenge. Mirrors the listen-side
+/// `AUTH_CHALLENGE_TIMEOUT`.
+const AUTH_PASSWORD_WAIT: Duration = Duration::from_secs(120);
+
 /// Drive the protocol handshake on a freshly-connected outbound DTLS
 /// link. Retransmits our [`ProtoEvent::hello`] until `receive_loop`
 /// flips `hello_ok` (the peer echoed a `PROTOCOL_MAGIC`-stamped
@@ -1047,16 +1111,30 @@ const HELLO_RETRY_INTERVAL: Duration = Duration::from_millis(750);
 /// a valid Hello — a stock lan-mouse, or anything that is not
 /// mousehop — has its connection refused here. This is the
 /// connect-side half of the deliberate hard cut-over from lan-mouse.
+/// While an access-password challenge is in flight (`auth_pending`),
+/// the attempt budget is suspended and the total-wait ceiling applies
+/// instead.
 async fn hello_handshake(
     addr: SocketAddr,
     conn: Arc<dyn Conn + Send + Sync>,
     hello_ok: Rc<Cell<bool>>,
+    auth_pending: Rc<Cell<bool>>,
 ) {
     let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::hello(local_commit()).into();
-    for _ in 0..HELLO_MAX_ATTEMPTS {
-        if hello_ok.get() {
-            return;
+    let started = Instant::now();
+    let mut attempts = 0;
+    while !hello_ok.get() {
+        if auth_pending.get() {
+            if started.elapsed() >= HELLO_TOTAL_DEADLINE {
+                break;
+            }
+            tokio::time::sleep(HELLO_RETRY_INTERVAL).await;
+            continue;
         }
+        if attempts >= HELLO_MAX_ATTEMPTS {
+            break;
+        }
+        attempts += 1;
         if let Err(e) = conn.send(&buf[..len]).await {
             log::debug!("hello send to {addr} failed: {e}");
         }
@@ -1083,6 +1161,7 @@ async fn ping_pong(
     tx: Sender<MousehopConnectionEvent>,
     ping_response: Rc<RefCell<HashSet<(SocketAddr, ConnectionSession)>>>,
     ping_sent_at: Rc<RefCell<HashMap<(SocketAddr, ConnectionSession), Instant>>>,
+    auth_pending: Rc<Cell<bool>>,
 ) {
     loop {
         if client_manager.get_state(handle).is_none()
@@ -1155,6 +1234,16 @@ async fn ping_pong(
         }
 
         if !ping_response.borrow_mut().remove(&(addr, session)) {
+            if auth_pending.get() {
+                // An access-password challenge is in flight: the peer drops
+                // everything but the auth exchange pre-handshake, so the
+                // unanswered ping round must not tear the connection down.
+                log::debug!(
+                    "{addr} ping round unanswered while access-password auth \
+                     is in flight; retrying"
+                );
+                continue;
+            }
             log::warn!("{addr} did not respond, closing connection");
             disconnect(
                 &client_manager,
@@ -1187,6 +1276,8 @@ async fn receive_loop(
     ping_response: Rc<RefCell<HashSet<(SocketAddr, ConnectionSession)>>>,
     ping_sent_at: Rc<RefCell<HashMap<(SocketAddr, ConnectionSession), Instant>>>,
     hello_ok: Rc<Cell<bool>>,
+    pending_passwords: Rc<std::sync::Mutex<HashMap<IpAddr, String>>>,
+    auth_pending: Rc<Cell<bool>>,
 ) {
     // Buffer sized for the largest legal variable-length frame so a single
     // DTLS recv never gets truncated. Fixed events use only the first
@@ -1220,6 +1311,76 @@ async fn receive_loop(
             continue;
         }
         match event {
+            ProtoEvent::AuthRequired { salt, nonce } => {
+                // The peer requires the access password before completing
+                // the handshake. Surface the requirement to the frontend
+                // (password dialog), then answer as soon as a password is
+                // submitted — the hello/keepalive windows are suspended
+                // for the duration.
+                auth_pending.set(true);
+                let asked_at = Instant::now();
+                tx.send(MousehopConnectionEvent::Received {
+                    handle,
+                    addr,
+                    session,
+                    event: ProtoEvent::AuthRequired { salt, nonce },
+                })
+                .expect("channel closed");
+                let password = loop {
+                    let submitted = pending_passwords
+                        .lock()
+                        .expect("lock")
+                        .get(&addr.ip())
+                        .cloned();
+                    if let Some(password) = submitted {
+                        break Some(password);
+                    }
+                    if asked_at.elapsed() >= AUTH_PASSWORD_WAIT
+                        || client_manager.get_state(handle).is_none()
+                        || !connection_is_current(&conns, &sessions, handle, addr, session).await
+                    {
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                };
+                match password {
+                    Some(password) => {
+                        log::info!("{addr}: answering the access-password challenge");
+                        let proof = crypto::access_password_proof(&salt, &nonce, &password);
+                        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) =
+                            ProtoEvent::AuthPassword { proof }.into();
+                        if let Err(e) = conn.send(&buf[..len]).await {
+                            log::warn!("{addr}: failed to send the password answer: {e}");
+                            break;
+                        }
+                        // Stay in `auth_pending`: the peer either echoes a
+                        // Hello (accepted) or replies AuthResult { ok: false }.
+                    }
+                    None => {
+                        log::warn!(
+                            "{addr}: no access password submitted within \
+                             {AUTH_PASSWORD_WAIT:?} — closing connection"
+                        );
+                        let _ = conn.close().await;
+                        break;
+                    }
+                }
+            }
+            ProtoEvent::AuthResult { ok } => {
+                if ok {
+                    log::info!("{addr} accepted the access password; completing handshake");
+                    // hello_handshake resumes and retransmits the Hello;
+                    // the peer echoes it through the normal path.
+                    auth_pending.set(false);
+                } else {
+                    log::warn!("{addr} rejected the access password — closing connection");
+                    // Drop the wrong answer so the next attempt prompts again.
+                    pending_passwords.lock().expect("lock").remove(&addr.ip());
+                    auth_pending.set(false);
+                    let _ = conn.close().await;
+                    break;
+                }
+            }
             ProtoEvent::Pong(b) => {
                 client_manager.set_active_addr(handle, Some(addr));
                 client_manager.set_alive(handle, b);
@@ -1432,6 +1593,24 @@ mod tests {
         assert!(handshake_allows_event(
             false,
             &ProtoEvent::hello(*b"deadbeef")
+        ));
+        // The access-password exchange must pass the gate pre-handshake:
+        // the challenge arrives before any valid Hello, and the answer
+        // flows back the same way.
+        assert!(handshake_allows_event(
+            false,
+            &ProtoEvent::AuthRequired {
+                salt: [0; 16],
+                nonce: [0; 16],
+            }
+        ));
+        assert!(handshake_allows_event(
+            false,
+            &ProtoEvent::AuthPassword { proof: [0; 32] }
+        ));
+        assert!(handshake_allows_event(
+            false,
+            &ProtoEvent::AuthResult { ok: true }
         ));
     }
 
@@ -1716,6 +1895,7 @@ mod tests {
             tx,
             ping_response.clone(),
             ping_sent_at.clone(),
+            Rc::new(Cell::new(false)),
         )
         .await;
 

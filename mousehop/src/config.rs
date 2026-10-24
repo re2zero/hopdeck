@@ -83,6 +83,14 @@ struct ConfigToml {
     cert_path: Option<PathBuf>,
     clients: Option<Vec<TomlClient>>,
     authorized_fingerprints: Option<HashMap<String, IncomingPeerConfig>>,
+    /// Access password for inbound sessions. When set, peers whose
+    /// fingerprint is not in `authorized_fingerprints` may complete the DTLS
+    /// handshake but must answer a protocol-level challenge with
+    /// `SHA-256(salt || nonce || password)` before the session is admitted;
+    /// authorized fingerprints never see the challenge. The password is
+    /// held in plain text (v1 simplification — it never crosses the wire,
+    /// but protect the config file).
+    access_password: Option<String>,
     /// Per-OS clipboard suppression lists. Each host machine reads
     /// and writes only its own OS's slot; the rest round-trip
     /// untouched so a single config can be shared across machines.
@@ -581,6 +589,14 @@ impl Config {
             .as_ref()
             .and_then(|c| c.authorized_fingerprints.clone())
             .unwrap_or_default()
+    }
+
+    /// access password for inbound sessions (`None` = password auth off).
+    /// Stored in plain text by design (v1); it never crosses the wire.
+    pub fn access_password(&self) -> Option<String> {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.access_password.clone())
     }
 
     /// path to certificate

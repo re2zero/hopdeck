@@ -78,6 +78,9 @@ pub struct Service {
     frontend_listener: AsyncFrontendListener,
     /// authorized public key sha256 fingerprints
     authorized_keys: Arc<RwLock<HashMap<String, IncomingPeerConfig>>>,
+    /// Access password shared with the listener's auth gate; refreshed
+    /// from config on every config reload.
+    access_password: Arc<RwLock<Option<String>>>,
     /// Shared mDNS browse cache. Used at DTLS-accept time to
     /// reverse-lookup the connecting peer's IP back to the system
     /// hostname they advertise via Bonjour, so the GUI can show a
@@ -222,12 +225,18 @@ impl Service {
         let frontend_listener = AsyncFrontendListener::new().await?;
 
         let authorized_keys = Arc::new(RwLock::new(config.authorized_fingerprints()));
+        let access_password = Arc::new(RwLock::new(config.access_password()));
         // listener + connection. The primary-IP cache is owned by
         // the dialer side so its references survive Discovery
         // toggles; Discovery writes peer hints into it as browse
         // events arrive.
-        let listener =
-            MousehopListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
+        let listener = MousehopListener::new(
+            config.port(),
+            cert.clone(),
+            authorized_keys.clone(),
+            access_password.clone(),
+        )
+        .await?;
         let primary_cache: PrimaryCache = Default::default();
 
         // input capture + emulation. Emulation is wired before the
@@ -311,6 +320,7 @@ impl Service {
             resolver,
             latency,
             authorized_keys,
+            access_password,
             primary_cache,
             public_key_fingerprint,
             client_manager,
@@ -427,6 +437,9 @@ impl Service {
             FrontendRequest::AuthorizeKey(desc, fp) => {
                 self.add_authorized_key(desc, fp);
                 self.save_config().await;
+            }
+            FrontendRequest::SubmitAccessPassword { addr, password } => {
+                self.conn.submit_access_password(addr, password);
             }
             FrontendRequest::ChangePort(port) => self.change_port(port),
             FrontendRequest::Create => {
@@ -836,6 +849,7 @@ impl Service {
             .write()
             .unwrap()
             .clone_from(&authorized_keys);
+        *self.access_password.write().unwrap() = self.config.access_password();
         self.emulation.set_incoming_peers(authorized_keys);
         self.sync_frontend();
     }
@@ -1124,6 +1138,10 @@ impl Service {
             }
             ICaptureEvent::PeerCommitUpdated(handle) => {
                 self.broadcast_client(handle);
+            }
+            ICaptureEvent::PasswordRequired(addr) => {
+                log::info!("peer {addr} requires the access password; prompting frontend");
+                self.notify_frontend(FrontendEvent::PasswordRequired { addr });
             }
         }
     }

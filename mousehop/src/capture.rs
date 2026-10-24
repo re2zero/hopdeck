@@ -63,6 +63,11 @@ pub(crate) enum ICaptureEvent {
     /// fires later but reliably, so it carries the broadcast as a
     /// belt-and-suspenders fallback.
     PeerCommitUpdated(CaptureHandle),
+    /// The peer issued an access-password challenge on an outbound
+    /// connection and is waiting for the answer. Forwarded so Service
+    /// prompts the frontend, which replies via
+    /// `FrontendRequest::SubmitAccessPassword`. `addr` is the peer's IP.
+    PasswordRequired(std::net::IpAddr),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1098,9 +1103,9 @@ impl CaptureTask {
                     None => return Ok(()),
                 },
                 connection_event = self.conn.recv() => {
-                    let (handle, session, event) = match connection_event {
-                        MousehopConnectionEvent::Received { handle, session, event, .. } => {
-                            (handle, session, event)
+                    let (handle, session, event, peer_ip) = match connection_event {
+                        MousehopConnectionEvent::Received { handle, session, event, addr, .. } => {
+                            (handle, session, event, Some(addr.ip()))
                         }
                         MousehopConnectionEvent::Disconnected { handle, session } => {
                             self.peer_capabilities.remove(&(handle, session));
@@ -1366,6 +1371,18 @@ impl CaptureTask {
                                 .send(ICaptureEvent::PeerCommitUpdated(handle))
                                 .expect("channel closed");
                             let _ = self.retry_lock_recovery_for(handle).await;
+                        }
+                        // Peer demands the access password before the
+                        // handshake completes. Bubble up so Service prompts
+                        // the frontend; the connect-side receive loop is
+                        // already polling for the submitted answer.
+                        ProtoEvent::AuthRequired { .. } => {
+                            let Some(ip) = peer_ip else {
+                                continue;
+                            };
+                            self.event_tx
+                                .send(ICaptureEvent::PasswordRequired(ip))
+                                .expect("channel closed");
                         }
                         _ => {}
                     }
