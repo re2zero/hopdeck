@@ -97,9 +97,20 @@ pub const CAP_TRANSACTIONAL_HANDOVER: u32 = 1 << 1;
 /// budget runs out.
 pub const CAP_ACCESS_PASSWORD: u32 = 1 << 2;
 
+/// Peer supports the optional video pipeline: the emulation side announces
+/// its video listener via [`ProtoEvent::VideoOffer`] and accepts a separate
+/// UDP+DTLS video channel (same certificate, same authorization table).
+/// Old peers decode the appended tags as unknown datagrams and skip them,
+/// so video stays a pure capability add-on.
+pub const CAP_VIDEO: u32 = 1 << 3;
+
+/// Video codec id for [`ProtoEvent::VideoOffer`]: OpenH264 software H.264
+/// baseline (the v1 pipeline codec).
+pub const VIDEO_CODEC_OPENH264: u8 = 0;
+
 /// Capabilities implemented completely by this protocol build.
 pub const PROTOCOL_CAPABILITIES: u32 =
-    CAP_ATOMIC_HANDOVER | CAP_TRANSACTIONAL_HANDOVER | CAP_ACCESS_PASSWORD;
+    CAP_ATOMIC_HANDOVER | CAP_TRANSACTIONAL_HANDOVER | CAP_ACCESS_PASSWORD | CAP_VIDEO;
 
 /// error type for protocol violations
 #[derive(Debug, Error)]
@@ -361,6 +372,24 @@ pub enum ProtoEvent {
     /// a connection close; repeated failures are rate-limited by the listen
     /// side.
     AuthResult { ok: bool },
+    /// The emulation side announces an optional video channel: it has bound
+    /// `port` for a UDP+DTLS video socket (same certificate, peer must be in
+    /// the same authorization table) and will push `width`x`height` frames
+    /// at up to `max_fps` fps, encoded with `codec`. The capturing peer
+    /// dials on demand (e.g. while its user has the picture toggled on) and
+    /// treats this event as stale when a newer one arrives. Requires
+    /// [`CAP_VIDEO`] on both sides.
+    VideoOffer {
+        port: u16,
+        codec: u8,
+        max_fps: u8,
+        width: u16,
+        height: u16,
+    },
+    /// The video announcement is withdrawn (channel closed, video disabled,
+    /// or the announcing session ended). The capturing peer tears down its
+    /// video connection for this peer.
+    VideoStop,
 }
 
 impl Display for ProtoEvent {
@@ -463,6 +492,17 @@ impl Display for ProtoEvent {
             ProtoEvent::AuthResult { ok } => {
                 write!(f, "AuthResult({})", if *ok { "ok" } else { "denied" })
             }
+            ProtoEvent::VideoOffer {
+                port,
+                codec,
+                max_fps,
+                width,
+                height,
+            } => write!(
+                f,
+                "VideoOffer(:{port}, codec={codec}, {width}x{height}@{max_fps})"
+            ),
+            ProtoEvent::VideoStop => write!(f, "VideoStop"),
         }
     }
 }
@@ -518,6 +558,11 @@ pub enum EventType {
     AuthPassword,
     /// Verdict for [`EventType::AuthPassword`].
     AuthResult,
+    /// Fixed-size video-channel announcement. Appended so all legacy tags
+    /// remain wire-stable.
+    VideoOffer,
+    /// Withdrawal of the current video announcement.
+    VideoStop,
 }
 
 fn input_event_wire_len(event_type: EventType) -> Option<usize> {
@@ -638,6 +683,8 @@ impl ProtoEvent {
             ProtoEvent::AuthRequired { .. } => EventType::AuthRequired,
             ProtoEvent::AuthPassword { .. } => EventType::AuthPassword,
             ProtoEvent::AuthResult { .. } => EventType::AuthResult,
+            ProtoEvent::VideoOffer { .. } => EventType::VideoOffer,
+            ProtoEvent::VideoStop => EventType::VideoStop,
         }
     }
 }
@@ -771,6 +818,14 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
             EventType::AuthResult => Ok(Self::AuthResult {
                 ok: decode_u8(&mut buf)? != 0,
             }),
+            EventType::VideoOffer => Ok(Self::VideoOffer {
+                port: decode_u16(&mut buf)?,
+                codec: decode_u8(&mut buf)?,
+                max_fps: decode_u8(&mut buf)?,
+                width: decode_u16(&mut buf)?,
+                height: decode_u16(&mut buf)?,
+            }),
+            EventType::VideoStop => Ok(Self::VideoStop),
         }
     }
 }
@@ -821,6 +876,8 @@ pub fn decode_fixed_event(bytes: &[u8]) -> Result<ProtoEvent, ProtocolError> {
         EventType::AuthRequired => (bytes.len() == 33, "33 bytes"),
         EventType::AuthPassword => (bytes.len() == 33, "33 bytes"),
         EventType::AuthResult => (bytes.len() == 2, "2 bytes"),
+        EventType::VideoOffer => (bytes.len() == 9, "9 bytes"),
+        EventType::VideoStop => (bytes.len() == 1, "1 byte"),
         EventType::Clipboard | EventType::DisplayLayout => {
             (false, "a dedicated variable-length frame")
         }
@@ -999,6 +1056,20 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                     }
                 }
                 ProtoEvent::AuthResult { ok } => encode_u8(buf, len, ok as u8),
+                ProtoEvent::VideoOffer {
+                    port,
+                    codec,
+                    max_fps,
+                    width,
+                    height,
+                } => {
+                    encode_u16(buf, len, port);
+                    encode_u8(buf, len, codec);
+                    encode_u8(buf, len, max_fps);
+                    encode_u16(buf, len, width);
+                    encode_u16(buf, len, height);
+                }
+                ProtoEvent::VideoStop => {}
             }
         }
         (buf, len)
@@ -1018,6 +1089,7 @@ macro_rules! decode_impl {
 }
 
 decode_impl!(u8);
+decode_impl!(u16);
 decode_impl!(u32);
 decode_impl!(i32);
 decode_impl!(f32);
@@ -1048,6 +1120,7 @@ macro_rules! encode_impl {
 }
 
 encode_impl!(u8);
+encode_impl!(u16);
 encode_impl!(u32);
 encode_impl!(i32);
 encode_impl!(f32);
@@ -1316,6 +1389,41 @@ mod tests {
             }
             other => panic!("expected Hello, got {other}"),
         }
+    }
+
+    #[test]
+    fn video_offer_and_stop_round_trip() {
+        let offer = ProtoEvent::VideoOffer {
+            port: 4262,
+            codec: VIDEO_CODEC_OPENH264,
+            max_fps: 30,
+            width: 1920,
+            height: 1080,
+        };
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = offer.into();
+        assert_eq!(len, 9);
+        match decode_fixed_event(&buf[..len]).expect("decode offer") {
+            ProtoEvent::VideoOffer {
+                port,
+                codec,
+                max_fps,
+                width,
+                height,
+            } => {
+                assert_eq!(
+                    (port, codec, max_fps, width, height),
+                    (4262, VIDEO_CODEC_OPENH264, 30, 1920, 1080)
+                );
+            }
+            other => panic!("expected VideoOffer, got {other}"),
+        }
+
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::VideoStop.into();
+        assert_eq!(len, 1);
+        assert!(matches!(
+            decode_fixed_event(&buf[..len]).expect("decode stop"),
+            ProtoEvent::VideoStop
+        ));
     }
 
     #[test]
