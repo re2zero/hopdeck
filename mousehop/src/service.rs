@@ -104,6 +104,11 @@ pub struct Service {
     incoming_conns: HashSet<SocketAddr>,
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
+    /// Startup snapshot of per-client tunnel forwards. The ipc
+    /// `ClientConfig` doesn't carry them (no protocol change), so
+    /// `save_config` re-attaches them from here; entries are dropped when
+    /// the client is deleted. Editing forwards requires a daemon restart.
+    tunnel_forwards: HashMap<ClientHandle, (u16, Vec<crate::tunnel::ForwardSpec>)>,
     /// Retained peer lock-recovery states, keyed by authenticated certificate
     /// fingerprint so a reconnect on a new source port keeps the same identity.
     remote_host_states: HashMap<String, RemoteHostRecovery>,
@@ -213,8 +218,13 @@ fn record_remote_host_state(
 impl Service {
     pub async fn new(config: Config) -> Result<Self, ServiceError> {
         let client_manager = ClientManager::default();
+        let mut forward_specs: HashMap<ClientHandle, (u16, Vec<crate::tunnel::ForwardSpec>)> =
+            HashMap::new();
         for client in config.clients() {
-            client_manager.add_with_config(client);
+            let handle = client_manager.add_with_config(client.clone());
+            if !client.tunnel_forwards.is_empty() {
+                forward_specs.insert(handle, (client.tunnel_port, client.tunnel_forwards));
+            }
         }
 
         // load certificate
@@ -256,6 +266,28 @@ impl Service {
         // pipeline so per-peer post-processing is applied from the
         // first incoming packet.
         emulation.set_incoming_peers(authorized_keys.read().expect("lock").clone());
+
+        // Reverse tunnel (M2c). The exit reads session liveness from the
+        // client manager (the reverse session lives in the connect side);
+        // forwarders dial independently and are gated by the exit's check.
+        if let Some(exit_config) = config.tunnel() {
+            crate::tunnel::spawn_exit(
+                exit_config,
+                cert.clone(),
+                authorized_keys.clone(),
+                client_manager.clone(),
+            );
+        }
+        for (handle, (tunnel_port, specs)) in &forward_specs {
+            crate::tunnel::spawn_forward(
+                client_manager.clone(),
+                *handle,
+                cert.clone(),
+                authorized_keys.clone(),
+                specs.clone(),
+                *tunnel_port,
+            );
+        }
 
         let conn_for_service = conn.sender_clone();
         let capture = Capture::new(
@@ -331,6 +363,7 @@ impl Service {
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
+            tunnel_forwards: forward_specs,
             remote_host_states: Default::default(),
             next_trigger_handle: 0,
             discovery,
@@ -798,23 +831,32 @@ impl Service {
     }
 
     async fn save_config(&mut self) {
-        let clients = self.client_manager.clients();
+        let clients = self.client_manager.get_client_states();
         let clients = clients
             .into_iter()
-            .map(|(c, s)| ConfigClient {
-                ips: HashSet::from_iter(c.fix_ips),
-                hostname: c.hostname,
-                port: c.port,
-                pos: c.pos,
-                active: s.active,
-                enter_hook: c.cmd,
-                mode: c.mode,
-                connect_mode: c.connect_mode,
-                network_locks: c.network_locks,
-                clipboard_send: c.clipboard_send,
-                command_as_ctrl: c.command_as_ctrl,
-                require_crossing_modifier: c.require_crossing_modifier,
-                crossing_modifier: c.crossing_modifier,
+            .map(|(handle, c, s)| {
+                let (tunnel_port, tunnel_forwards) = self
+                    .tunnel_forwards
+                    .get(&handle)
+                    .map(|(port, specs)| (*port, specs.clone()))
+                    .unwrap_or((crate::tunnel::DEFAULT_TUNNEL_PORT, Vec::new()));
+                ConfigClient {
+                    ips: HashSet::from_iter(c.fix_ips),
+                    hostname: c.hostname,
+                    port: c.port,
+                    pos: c.pos,
+                    active: s.active,
+                    enter_hook: c.cmd,
+                    mode: c.mode,
+                    connect_mode: c.connect_mode,
+                    network_locks: c.network_locks,
+                    clipboard_send: c.clipboard_send,
+                    command_as_ctrl: c.command_as_ctrl,
+                    require_crossing_modifier: c.require_crossing_modifier,
+                    crossing_modifier: c.crossing_modifier,
+                    tunnel_forwards,
+                    tunnel_port,
+                }
             })
             .collect();
         self.config.set_clients(clients);
@@ -1281,6 +1323,22 @@ impl Service {
             if self.client_manager.connect_mode(handle) != ConnectMode::Reverse {
                 continue;
             }
+            // D31④: a reverse transport that died before/without a live
+            // adopted session looks alive forever — the ping below is a
+            // plain UDP write on the dead DTLS conn and succeeds silently,
+            // so the send path never errors and nothing else re-dials.
+            // Detect the zombie (active address installed, no live inbound
+            // session for it) and reset the handle so the ping re-dials
+            // instead of feeding a corpse.
+            if let Some(addr) = self.client_manager.active_addr(handle) {
+                if self.incoming_session(addr).is_none() {
+                    log::warn!(
+                        "reverse client {handle} keeps a transport at {addr} \
+                         with no live session — resetting so it re-dials"
+                    );
+                    self.conn.reset_handle(handle).await;
+                }
+            }
             if let Err(e) = self.conn.send(ProtoEvent::Ping, handle).await {
                 log::debug!("reverse dial to client {handle} still pending: {e}");
             }
@@ -1697,6 +1755,9 @@ impl Service {
         // releases its emulation handle on connection close, and Capture gets
         // the matching terminal event before any replacement can dial.
         self.conn.reset_handle(handle).await;
+        // Same handle-reuse concern for the tunnel snapshot: drop it before
+        // the slot can be handed to another peer.
+        self.tunnel_forwards.remove(&handle);
         if self
             .client_manager
             .remove_client(handle)

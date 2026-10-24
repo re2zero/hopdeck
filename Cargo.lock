@@ -5092,6 +5092,7 @@ dependencies = [
  "slab",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "toml 0.8.23",
  "toml_edit 0.22.27",

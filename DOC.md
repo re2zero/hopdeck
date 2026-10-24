@@ -98,3 +98,35 @@ Wire impact: three fixed-size event tags appended (26–28);
 `MAX_EVENT_SIZE` raised to 33 bytes to fit the 32-byte auth payloads.
 Serialization of existing events is unchanged — no protocol version bump.
 
+
+## Reverse Tunnel Forwarding (M2c)
+
+On a one-way network (the restricted side dials out, the exit side cannot
+dial in), the restricted side can reach *network services* through the
+session peer: loopback-only services, subnet hosts only the peer routes to,
+and names only the peer resolves. Design: `.relay/DESIGN-m2c-tunnel-forward.md`.
+
+Transport is a dedicated TCP channel (default `4253/tcp`, independent of the
+UDP+DTLS input session so bulk traffic never competes with input) carrying
+mutually-TLS'd, length-prefixed frames:
+
+```
+[tag: u8][stream_id: u32][payload_len: u32][payload]   # big-endian
+```
+
+| tag | name     | payload | notes |
+|-----|----------|---------|-------|
+| 1   | OPEN     | JSON `{target, port, nonce}` | initiator asks for a stream; exit validates the allow rules |
+| 2   | OPEN_ACK | JSON `{ok, nonce, reason}` | `reason` is deliberately coarse |
+| 3   | DATA     | raw bytes (≤16 KiB) | stream data |
+| 4   | ACK      | `u32` consumed | cumulative credit return, 256 KiB window per direction |
+| 5   | CLOSE    | — | half-close (TCP FIN); stream dies when both sides closed |
+
+Stream ids are parity-split (initiator odd, exit even) so both sides can
+allocate collision-free. A channel is admitted only when the peer's
+certificate fingerprint is in `authorized_fingerprints` **and** that peer
+holds a live input session from the same source IP — the tunnel rides the
+session's trust and dies with it. The exit dials only targets matching its
+`[tunnel].allow` rules (default deny); domain targets are resolved by the
+exit, which is what makes split-horizon names work. mousehop-proto is
+untouched: the tunnel is an application-layer protocol on its own channel.

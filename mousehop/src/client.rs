@@ -745,6 +745,8 @@ mod tests {
             command_as_ctrl: false,
             require_crossing_modifier: false,
             crossing_modifier: CrossingModifier::default(),
+            tunnel_forwards: Vec::new(),
+            tunnel_port: crate::tunnel::DEFAULT_TUNNEL_PORT,
         });
         (cm, handle)
     }

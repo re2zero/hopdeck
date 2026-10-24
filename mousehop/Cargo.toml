@@ -56,6 +56,9 @@ rustls = { version = "0.23.12", default-features = false, features = [
     "std",
     "ring",
 ] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+] }
 rcgen = "0.13.1"
 sha2 = "0.10.8"
 getrandom = "0.3"

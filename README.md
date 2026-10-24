@@ -624,6 +624,58 @@ input — the controlled machine can receive input over it, but driving the
 controller's pointer back across the same tunnel requires a session dialed
 in the other direction (future work).
 
+### Reverse Tunnel Forwarding
+
+Beyond input, a machine on a one-way network can reach *network services*
+through the session peer: services bound to the peer's loopback, hosts only
+the peer can route to, and names only the peer can resolve. Connections ride
+a dedicated TCP channel (default port **4253/tcp** — add it to your firewall
+alongside 4252/udp) with mutual TLS reusing the session certificate, and are
+multiplexed per stream with credit-based flow control.
+
+The **reachable side** enables the exit with a `[tunnel]` section. The allow
+list is VPN-routing-rule shaped and default-deny: entries are an exact IP
+(any port), an IP with a port, a CIDR with an optional port, an exact domain
+with an optional port, or a `*.` wildcard domain — **domains are resolved by
+the exit side**, which is the point (split-horizon DNS, mDNS, hosts-only
+names):
+
+```toml
+[tunnel]
+listen = "0.0.0.0:4253"     # default 127.0.0.1:4253
+allow = [
+  "127.0.0.1",              # the exit's own loopback services
+  "10.0.0.0/8:22",          # a subnet, ssh only
+  "*.corp.local:443",       # wildcard subdomain
+]
+```
+
+The **restricted side** declares per-client forwards — a local listener plus
+a target, where the target may be an IP or a domain (resolved at the exit):
+
+```toml
+[[clients]]
+hostname = "office-controller"
+ips = ["10.8.15.60"]
+connect_mode = "reverse"
+
+[[clients.tunnel_forwards]]
+listen = "127.0.0.1:2222"
+target = "127.0.0.1:22"       # the peer's loopback sshd
+
+[[clients.tunnel_forwards]]
+listen = "127.0.0.1:18080"
+target = "nas.local:5000"     # resolved by the peer
+```
+
+A tunnel channel is only admitted while its certificate fingerprint matches
+an authorized peer that currently holds a live input session from the same
+address — the tunnel lives and dies with the session, and `ssh -p 2222
+localhost` on the restricted side reaches the target through the peer.
+Forwards are read at daemon startup; editing them requires a restart.
+Restrictions of the v1: TCP only (no UDP), no SOCKS-style dynamic
+forwarding, no transparent interception.
+
 ## Detailed OS Support
 
 In order to use a device for sending events, an **input-capture** backend is required, while receiving events requires

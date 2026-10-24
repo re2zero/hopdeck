@@ -8,7 +8,7 @@ use std::env::{self, VarError};
 use std::fmt::Display;
 use std::fs::{self, File};
 use std::io::Write;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::{collections::HashSet, io};
 use thiserror::Error;
@@ -20,6 +20,8 @@ use mousehop_ipc::{
     ClipboardSuppression, ConnectMode, ConnectionMode, CrossingModifier, DEFAULT_PORT,
     IncomingPeerConfig, Position,
 };
+
+use crate::tunnel::{DEFAULT_TUNNEL_PORT, ForwardSpec, TargetAddr};
 
 use input_event::scancode::{
     self,
@@ -98,6 +100,29 @@ struct ConfigToml {
     /// purely additive on top of platform-specific automatic
     /// detection (e.g. macOS `org.nspasteboard.ConcealedType`).
     clipboard_suppress_apps: Option<ClipboardSuppression>,
+    /// Reverse tunnel exit (M2c). Presence enables the exit listener;
+    /// absent means this machine neither accepts tunnel channels nor
+    /// forwards anything. See `.relay/DESIGN-m2c-tunnel-forward.md`.
+    tunnel: Option<TomlTunnel>,
+}
+
+/// `[tunnel]` — the exit side of the reverse tunnel.
+#[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq, Default)]
+pub struct TomlTunnel {
+    /// Listen address of the tunnel channel; default `127.0.0.1:4253`.
+    listen: Option<String>,
+    /// Allow rules for forwarded targets (IP / CIDR / `*.`-domain,
+    /// optional `:port`). Default deny when absent or empty.
+    allow: Option<Vec<String>>,
+}
+
+/// One `[[clients.tunnel_forwards]]` entry: a local listener whose
+/// connections ride the peer's tunnel exit to `target` (host:port; the
+/// exit resolves domains).
+#[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
+pub struct TomlTunnelForward {
+    listen: String,
+    target: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -137,6 +162,13 @@ struct TomlClient {
     /// re-enabling the gate does not lose the user's selection.
     #[serde(default)]
     crossing_modifier: Option<CrossingModifier>,
+    /// Local listeners forwarded through this peer's tunnel exit.
+    /// Absent in legacy configs; default empty.
+    #[serde(default)]
+    tunnel_forwards: Option<Vec<TomlTunnelForward>>,
+    /// Port of this peer's tunnel exit. Absent → `tunnel::DEFAULT_TUNNEL_PORT`.
+    #[serde(default)]
+    tunnel_port: Option<u16>,
 }
 
 impl ConfigToml {
@@ -355,6 +387,7 @@ pub struct Config {
     watch_rx: tokio::sync::mpsc::Receiver<Result<notify::Event, notify::Error>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConfigClient {
     pub ips: HashSet<IpAddr>,
     pub hostname: Option<String>,
@@ -369,6 +402,10 @@ pub struct ConfigClient {
     pub command_as_ctrl: bool,
     pub require_crossing_modifier: bool,
     pub crossing_modifier: CrossingModifier,
+    /// Local listeners forwarded through this peer's tunnel exit.
+    /// Invalid entries are dropped with a warning, not a load error.
+    pub tunnel_forwards: Vec<ForwardSpec>,
+    pub tunnel_port: u16,
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -386,6 +423,17 @@ impl From<TomlClient> for ConfigClient {
         let command_as_ctrl = toml.command_as_ctrl.unwrap_or(false);
         let require_crossing_modifier = toml.require_crossing_modifier.unwrap_or(false);
         let crossing_modifier = toml.crossing_modifier.unwrap_or_default();
+        let mut tunnel_forwards = Vec::new();
+        for entry in toml.tunnel_forwards.into_iter().flatten() {
+            match parse_tunnel_forward(&entry) {
+                Ok(spec) => tunnel_forwards.push(spec),
+                Err(e) => log::warn!(
+                    "config: dropping tunnel forward `{}` -> `{}`: {e}",
+                    entry.listen,
+                    entry.target
+                ),
+            }
+        }
         Self {
             ips,
             hostname,
@@ -400,8 +448,22 @@ impl From<TomlClient> for ConfigClient {
             command_as_ctrl,
             require_crossing_modifier,
             crossing_modifier,
+            tunnel_forwards,
+            tunnel_port: toml.tunnel_port.unwrap_or(DEFAULT_TUNNEL_PORT),
         }
     }
+}
+
+fn parse_tunnel_forward(entry: &TomlTunnelForward) -> Result<ForwardSpec, String> {
+    let listen: SocketAddr = entry
+        .listen
+        .parse()
+        .map_err(|_| format!("invalid listen address `{}`", entry.listen))?;
+    let target: TargetAddr = entry
+        .target
+        .parse()
+        .map_err(|e| format!("invalid target `{}`: {e}", entry.target))?;
+    Ok(ForwardSpec { listen, target })
 }
 
 impl From<ConfigClient> for TomlClient {
@@ -449,6 +511,19 @@ impl From<ConfigClient> for TomlClient {
         let connect_mode =
             (client.connect_mode != ConnectMode::default()).then_some(client.connect_mode);
         let network_locks = (!client.network_locks.is_empty()).then_some(client.network_locks);
+        // Tunnel forwards are opt-in like clipboard sharing: stay implicit
+        // when empty so untouched configs don't grow new sections.
+        let tunnel_forwards = (!client.tunnel_forwards.is_empty()).then(|| {
+            client
+                .tunnel_forwards
+                .iter()
+                .map(|spec| TomlTunnelForward {
+                    listen: spec.listen.to_string(),
+                    target: format!("{}:{}", spec.target.host, spec.target.port),
+                })
+                .collect()
+        });
+        let tunnel_port = (client.tunnel_port != DEFAULT_TUNNEL_PORT).then_some(client.tunnel_port);
         Self {
             hostname,
             host_name,
@@ -464,6 +539,8 @@ impl From<ConfigClient> for TomlClient {
             command_as_ctrl,
             require_crossing_modifier,
             crossing_modifier,
+            tunnel_forwards,
+            tunnel_port,
         }
     }
 }
@@ -597,6 +674,38 @@ impl Config {
         self.config_toml
             .as_ref()
             .and_then(|c| c.access_password.clone())
+    }
+
+    /// The `[tunnel]` exit configuration, when the section is present.
+    /// `None` = exit disabled. A bad listen address or allow rule disables
+    /// the exit with a warning instead of failing the whole config load —
+    /// a broken tunnel must never take input sharing down with it.
+    pub fn tunnel(&self) -> Option<crate::tunnel::ExitConfig> {
+        let tunnel = self.config_toml.as_ref()?.tunnel.as_ref()?;
+        let default_listen = format!("127.0.0.1:{DEFAULT_TUNNEL_PORT}");
+        let listen: SocketAddr = tunnel
+            .listen
+            .as_deref()
+            .unwrap_or(&default_listen)
+            .parse()
+            .map_err(|e| {
+                log::warn!("config: invalid [tunnel].listen: {e} — tunnel exit disabled");
+                e
+            })
+            .ok()?;
+        let allow = match &tunnel.allow {
+            Some(rules) => match crate::tunnel::AllowList::from_strings(rules) {
+                Ok(list) => list,
+                Err(e) => {
+                    log::warn!("config: invalid [tunnel].allow: {e} — tunnel exit disabled");
+                    return None;
+                }
+            },
+            // Absent allow list = default deny: the exit runs but rejects
+            // every OPEN. Explicitly configured, still safe by default.
+            None => crate::tunnel::AllowList::default(),
+        };
+        Some(crate::tunnel::ExitConfig { listen, allow })
     }
 
     /// path to certificate
@@ -845,6 +954,8 @@ mod connection_mode_tests {
             command_as_ctrl: false,
             require_crossing_modifier: false,
             crossing_modifier: CrossingModifier::default(),
+            tunnel_forwards: Vec::new(),
+            tunnel_port: DEFAULT_TUNNEL_PORT,
         }
     }
 
@@ -993,5 +1104,108 @@ mod connection_mode_tests {
         let disabled: TomlClient = back.into();
         assert_eq!(disabled.require_crossing_modifier, None);
         assert_eq!(disabled.crossing_modifier, Some(CrossingModifier::Alt));
+    }
+}
+
+#[cfg(test)]
+mod tunnel_roundtrip_tests {
+    use super::*;
+
+    #[test]
+    fn tunnel_forwards_round_trip_through_toml() {
+        let toml_source = r#"
+[[clients]]
+hostname = "a"
+ips = ["192.168.101.16"]
+port = 4307
+connect_mode = "reverse"
+tunnel_port = 14253
+
+[[clients.tunnel_forwards]]
+listen = "127.0.0.1:2222"
+target = "127.0.0.1:22"
+
+[[clients.tunnel_forwards]]
+listen = "127.0.0.1:18080"
+target = "nas.local:5000"
+
+[[clients]]
+hostname = "plain"
+ips = ["10.0.0.1"]
+"#;
+        let config: ConfigToml = toml::from_str(toml_source).expect("parse");
+        let clients: Vec<ConfigClient> = config
+            .clients
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(ConfigClient::from)
+            .collect();
+
+        let forwarded = &clients[0];
+        assert_eq!(forwarded.tunnel_port, 14253);
+        assert_eq!(forwarded.tunnel_forwards.len(), 2);
+        assert_eq!(
+            forwarded.tunnel_forwards[0].listen.to_string(),
+            "127.0.0.1:2222"
+        );
+        assert_eq!(forwarded.tunnel_forwards[0].target.host, "127.0.0.1");
+        assert_eq!(forwarded.tunnel_forwards[0].target.port, 22);
+        assert_eq!(forwarded.tunnel_forwards[1].target.host, "nas.local");
+        assert_eq!(forwarded.tunnel_forwards[1].target.port, 5000);
+        // A client without forwards stays default: empty vec + default port.
+        assert!(clients[1].tunnel_forwards.is_empty());
+        assert_eq!(clients[1].tunnel_port, DEFAULT_TUNNEL_PORT);
+
+        // Round trip: persisted TOML keeps explicit forwards, stays
+        // implicit (no new fields) for the untouched client.
+        let persisted: Vec<TomlClient> =
+            clients.clone().into_iter().map(TomlClient::from).collect();
+        assert_eq!(
+            persisted[0].tunnel_forwards.as_ref().expect("kept").len(),
+            2
+        );
+        assert_eq!(persisted[0].tunnel_port, Some(14253));
+        assert!(persisted[1].tunnel_forwards.is_none());
+        assert!(persisted[1].tunnel_port.is_none());
+
+        // And re-parsing the persisted form yields the same clients.
+        let serialized = toml::to_string(&ConfigToml {
+            clients: Some(persisted),
+            ..Default::default()
+        })
+        .expect("serialize");
+        let reparsed: ConfigToml = toml::from_str(&serialized).expect("reparse");
+        let reparsed_clients: Vec<ConfigClient> = reparsed
+            .clients
+            .unwrap_or_default()
+            .into_iter()
+            .map(ConfigClient::from)
+            .collect();
+        assert_eq!(reparsed_clients[0], clients[0]);
+    }
+
+    #[test]
+    fn invalid_forward_entries_are_dropped_with_defaults() {
+        let toml_source = r#"
+[[clients]]
+hostname = "a"
+ips = ["10.0.0.1"]
+
+[[clients.tunnel_forwards]]
+listen = "not-an-addr"
+target = "127.0.0.1:22"
+
+[[clients.tunnel_forwards]]
+listen = "127.0.0.1:2223"
+target = "no-port-here"
+"#;
+        let config: ConfigToml = toml::from_str(toml_source).expect("parse");
+        let client =
+            ConfigClient::from(config.clients.into_iter().flatten().next().expect("client"));
+        assert!(
+            client.tunnel_forwards.is_empty(),
+            "invalid entries are dropped, not fatal"
+        );
     }
 }
