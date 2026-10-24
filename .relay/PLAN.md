@@ -11,7 +11,7 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 
 - [ ] M3a
 ## 当前焦点
-- 当前里程碑：**M3a 画面链路实现（增量推进，设计 D34 拍板「全按推荐」）**。进度：增量① `mousehop-video` crate **已落地**（2ecbf6d：capture dummy 彩条帧计数源 / yuv BGRA↔I420 / codec OpenH264 软编软解（解码毒化自愈）/ transport 分帧重组；17 单测+3 E2E 绿，clippy 净）；下一步 = 增量② proto `CAP_VIDEO=1<<3` + `VideoOffer`/`VideoStop` + 独立 UDP+DTLS video 通道（任务账本 T2，随后 T3 portal 采集 / T4 console RenderSurface / T5 PLI+parity）。验收：LAN 1080p 端到端 <150 ms（真机 HD 6450 走软编，D34 拍板项①）；画面关闭后键鼠共享延迟与 CPU 对 M2 基线无显著退化。
+- 当前里程碑：**M3a 画面链路实现（增量推进，设计 D34 拍板「全按推荐」）**。进度：增量① `mousehop-video` crate **已落地**（2ecbf6d：capture dummy 彩条帧计数源 / yuv BGRA↔I420 / codec OpenH264 软编软解（解码毒化自愈）/ transport 分帧重组；17 单测+3 E2E 绿，clippy 净）；增量② **proto 半已落地**（18d46b3：CAP_VIDEO=1<<3 + VIDEO_CODEC_OPENH264 + VideoOffer{port,codec,max_fps,width,height}/VideoStop 定长事件，proto 22 测试绿），**②b daemon video UDP+DTLS 通道接线未动**（任务账本 T2；接线锚点在 HANDOFF-020「下一步精确动作」）；随后 T3 portal 采集 / T4 console RenderSurface / T5 PLI+parity。验收：LAN 1080p 端到端 <150 ms（真机 HD 6450 走软编，D34 拍板项①）；画面关闭后键鼠共享延迟与 CPU 对 M2 基线无显著退化。
 - **M2c 反向隧道转发已收口**（e07e45e 实现六文件 ~2.3k 行 + D31① 竞速修复；双实例 E2E 五项全过，0a99daa 记账）；唯一欠账 = 真机 M2c 复验（等真机批次，与真机 Wayland 同批安排）。
 - 遗留待公子：① gpui-kit issues 上报（D29 延后至全部完成）；② console 自动重连语义（D27③）；③ Wayland 测试机安排（真机 Wayland 交叉验证 + M2c 真机复验）。
 
