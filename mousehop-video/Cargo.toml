@@ -1,0 +1,18 @@
+[package]
+name = "mousehop-video"
+description = "video pipeline for mousehop: capture, codec, transport"
+version.workspace = true
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jondkinney/mousehop"
+
+[dependencies]
+log = "0.4.22"
+openh264 = "0.9.9"
+thiserror = "2.0.0"
+tokio = { version = "1.32.0", default-features = false, features = ["time"] }
+futures-core = "0.3.30"
+
+[dev-dependencies]
+futures = "0.3.28"
+tokio = { version = "1.32.0", features = ["macros", "rt"] }
