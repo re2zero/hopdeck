@@ -1,7 +1,7 @@
 use crate::{
     capture::{Capture, CaptureType, ICaptureEvent},
     client::ClientManager,
-    config::{Config, ConfigClient},
+    config::{Config, ConfigClient, EmulationBackend},
     connect::MousehopConnection,
     crypto,
     discovery::{Discovery, DiscoveryEvent, PrimaryCache},
@@ -531,6 +531,9 @@ impl Service {
                     self.broadcast_client(handle);
                     self.save_config().await;
                 }
+            }
+            FrontendRequest::SetEmulationBackend(name) => {
+                self.apply_emulation_backend(name).await;
             }
             FrontendRequest::SetConnectionMode(handle, mode) => {
                 // Resolve the live network first: the user is acting on a
@@ -1350,6 +1353,48 @@ impl Service {
         }
     }
 
+    /// Hot-swap the input-emulation backend from a frontend request.
+    /// `name` is the config spelling (`"x11"`, `"usbip"`, …) or `None`
+    /// for automatic probing. Refused while a CLI `--emulation-backend`
+    /// override is in effect — it would silently win over the persisted
+    /// value. The frontend echo always carries the effective value; a
+    /// backend that fails to come up surfaces through the usual
+    /// `EmulationDisabled` status event.
+    async fn apply_emulation_backend(&mut self, name: Option<String>) {
+        let echo = |this: &mut Self| {
+            this.notify_frontend(FrontendEvent::EmulationBackend(
+                this.config.emulation_backend().map(|b| b.to_string()),
+            ));
+        };
+        let parse = |name: &str| -> Result<EmulationBackend, String> {
+            serde_json::from_value(serde_json::Value::String(name.to_owned()))
+                .map_err(|error| format!("unknown emulation backend {name:?}: {error}"))
+        };
+        let parsed = match name.as_deref().map(parse).transpose() {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                log::warn!("rejected emulation backend switch: {error}");
+                echo(self);
+                return;
+            }
+        };
+        if self.config.emulation_backend_override().is_some() {
+            log::warn!(
+                "emulation backend switch ignored: --emulation-backend override is in effect"
+            );
+            echo(self);
+            return;
+        }
+        log::info!(
+            "switching emulation backend → {}",
+            parsed.as_ref().map_or("auto".to_owned(), |b| b.to_string())
+        );
+        self.emulation.switch_backend(parsed.map(Into::into));
+        self.config.set_emulation_backend(parsed);
+        self.save_config().await;
+        echo(self);
+    }
+
     fn sync_frontend(&mut self) {
         // Frontends connect after startup: reconcile any authorized
         // peer recorded by a previous session against the clients
@@ -1357,6 +1402,9 @@ impl Service {
         self.backfill_peer_fingerprints();
         self.enumerate();
         self.notify_frontend(FrontendEvent::EmulationStatus(self.emulation_status));
+        self.notify_frontend(FrontendEvent::EmulationBackend(
+            self.config.emulation_backend().map(|b| b.to_string()),
+        ));
         self.notify_frontend(FrontendEvent::CaptureStatus(self.capture_status));
         self.notify_frontend(FrontendEvent::PortChanged(self.port, None));
         self.notify_frontend(FrontendEvent::PublicKeyFingerprint(

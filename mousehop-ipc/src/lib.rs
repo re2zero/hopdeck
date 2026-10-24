@@ -663,6 +663,10 @@ pub enum FrontendEvent {
     CaptureStatus(Status),
     /// emulation status
     EmulationStatus(Status),
+    /// the active input-emulation backend in its config spelling
+    /// (`"x11"`, `"usbip"`, …), or `None` for automatic probing.
+    /// Pushed on sync and after every accepted backend switch.
+    EmulationBackend(Option<String>),
     /// authorized public key fingerprints have been updated.
     /// The map's value carries each peer's per-pair receive-side
     /// post-processing preferences alongside its description.
@@ -810,6 +814,14 @@ pub enum FrontendRequest {
     /// Select the modifier family that gates crossing into an outgoing
     /// client.
     SetClientCrossingModifier(ClientHandle, CrossingModifier),
+    /// Switch this machine's input-emulation backend live: `Some`
+    /// names the backend in its config spelling (`"x11"`, `"usbip"`,
+    /// …), `None` restores automatic probing. The daemon tears down
+    /// the old backend (releasing held keys), creates the new one and
+    /// echoes [`FrontendEvent::EmulationBackend`]; the value persists
+    /// to config.toml unless a CLI `--emulation-backend` override is
+    /// in effect.
+    SetEmulationBackend(Option<String>),
     /// Set the base connection policy ([`ConnectionMode`]) for a
     /// client, and clear any explicit lock on the *current* network
     /// (so picking "Auto"/"Fastest" in the GUI releases a pin set

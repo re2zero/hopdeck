@@ -6,6 +6,7 @@
 //! console already mirrors, so the controls are plain
 //! request-send-without-local-state.
 
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     App, ClickEvent, Context, Entity, Hsla, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
@@ -125,28 +126,60 @@ impl Console {
         section
     }
 
-    /// Input emulation backend (design 常规页「后端」区). The backend is
-    /// machine-global config — the daemon builds it once at startup from
-    /// `emulation_backend` and never re-reads it live — so this section
-    /// explains how to switch instead of offering a selector (no IPC
-    /// request exists for it), and spells out the USB/IP receiver setup
-    /// the M2b acceptance requires.
+    /// Input emulation backend (design 常规页「后端」区): the live
+    /// selector plus the USB/IP receiver setup the M2b acceptance
+    /// requires. Clicks send `SetEmulationBackend`; the daemon echoes
+    /// the effective value through `EmulationBackend`, which updates
+    /// the chips and journals the switch.
     fn render_backend_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .id("settings-backend")
             .test_support()
             .child(self.render_kv_section("后端", cx))
-            .child(
-                v_flex()
-                    .mt_1()
-                    .child(div().text_sm().child("输入仿真"))
-                    .child(div().text_xs().text_color(muted).child(
-                        "本机全局，写在 config.toml 的 emulation_backend（缺省自动探测 \
-                                 libei → layer-shell → X11）；修改后重启服务生效。",
-                    )),
-            )
+            .child(self.render_emulation_backend_row(cx))
+            .child(div().text_xs().text_color(muted).child(
+                "本机全局，改动即时生效并写盘（config.toml 的 emulation_backend；\
+                 自动 = 依次探测 libei → layer-shell → X11）。",
+            ))
             .child(self.render_usbip_card(cx))
+    }
+
+    /// 自动 / X11 / USB/IP chips (design's 后端 select). USB/IP keeps
+    /// its guidance card below — it still needs receiver-side setup.
+    fn render_emulation_backend_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let current = self.emulation_backend.as_deref();
+        let options = [
+            ("backend-auto", None, "自动"),
+            ("backend-x11", Some("x11"), "X11"),
+            ("backend-usbip", Some("usbip"), "USB/IP"),
+        ];
+
+        let mut row = h_flex()
+            .items_center()
+            .gap_2()
+            .child(div().text_sm().child("输入仿真"));
+        for (id, value, label) in options {
+            let selected = current == value;
+            let request = value.map(str::to_string);
+            row = row.child(
+                Button::new(id)
+                    .label(label)
+                    .small()
+                    .when(selected, |b| b.primary())
+                    .when(!selected, |b| b.ghost())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, _| {
+                        this.request(FrontendRequest::SetEmulationBackend(request.clone()));
+                    })),
+            );
+        }
+        row.child(
+            div()
+                .text_xs()
+                .text_color(muted)
+                .child("注入本机键鼠用的后端"),
+        )
     }
 
     /// USB/IP is the compositor-free fallback (M1): injection at the
@@ -202,7 +235,7 @@ impl Console {
                 div()
                     .text_xs()
                     .text_color(muted)
-                    .child("② 写入同一台机器的 config.toml 并重启服务（该后端从不自动选中）："),
+                    .child("② 在上方「输入仿真」选 USB/IP（或写 config.toml 的 emulation_backend；该后端从不自动选中）："),
             )
             .child(command("emulation_backend = \"usbip\""))
             .child(

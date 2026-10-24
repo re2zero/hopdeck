@@ -278,6 +278,12 @@ pub(crate) enum EmulationEvent {
 
 pub(crate) enum EmulationRequest {
     Reenable,
+    /// Hot-swap the input-emulation backend (`None` = automatic
+    /// probing). The proxy tears the old backend down — releasing held
+    /// keys — creates the new one and keeps all connection bookkeeping.
+    SwitchBackend {
+        backend: Option<input_emulation::Backend>,
+    },
     Release {
         addr: SocketAddr,
         session: ListenerSession,
@@ -353,6 +359,17 @@ impl Emulation {
     pub(crate) fn reenable(&self) {
         self.request_tx
             .send(EmulationRequest::Reenable)
+            .expect("channel closed");
+    }
+
+    /// Swap the injection backend live. Fire-and-forget: the listen
+    /// task awaits the proxy, so the echo to the frontend
+    /// ([`FrontendEvent::EmulationBackend`]) is sent by the service
+    /// right after this returns; a backend that fails to come up
+    /// surfaces through the usual `EmulationDisabled` event instead.
+    pub(crate) fn switch_backend(&self, backend: Option<input_emulation::Backend>) {
+        self.request_tx
+            .send(EmulationRequest::SwitchBackend { backend })
             .expect("channel closed");
     }
 
@@ -1117,6 +1134,9 @@ impl ListenTask {
                 request = self.request_rx.recv() => match request.expect("channel closed") {
                     // reenable emulation
                     EmulationRequest::Reenable => self.emulation_proxy.reenable(),
+                    EmulationRequest::SwitchBackend { backend } => {
+                        self.emulation_proxy.switch_backend(backend).await;
+                    }
                     // notify the other end that we hit a barrier (should release capture)
                     EmulationRequest::Release { addr, session, handover } => {
                         // Leave(0) remains the legacy handover signal so a
@@ -1368,6 +1388,15 @@ pub(crate) struct EmulationProxy {
 
 enum ProxyRequest {
     Input(Event, SocketAddr),
+    /// Hot-swap the injection backend. Handled wherever the request
+    /// lands: the task records the new backend and signals the caller,
+    /// then lets the existing teardown/rebuild cycle recreate
+    /// `InputEmulation` (`run` applies a parked switch right after the
+    /// current backend unwinds).
+    SwitchBackend {
+        backend: Option<input_emulation::Backend>,
+        done: oneshot::Sender<()>,
+    },
     Remove(SocketAddr),
     /// Terminal DTLS teardown. Unlike `Remove`, also discard per-address
     /// settings because a reconnect normally arrives from a new ephemeral
@@ -1401,6 +1430,7 @@ impl EmulationProxy {
         let display_layout = Rc::new(RefCell::new(None));
         let emulation_task = EmulationTask {
             backend,
+            pending_switch: None,
             exit_requested: exit_requested.clone(),
             display_bounds: display_bounds.clone(),
             display_layout: display_layout.clone(),
@@ -1524,6 +1554,28 @@ impl EmulationProxy {
             .expect("channel closed");
     }
 
+    /// Ask the emulation task to swap the injection backend. Bounded
+    /// wait: the task answers once it has parked the switch and unwound
+    /// the old backend — the new one comes up right after, and a
+    /// backend that fails to start surfaces through `EmulationDisabled`.
+    async fn switch_backend(&self, backend: Option<input_emulation::Backend>) {
+        const SWITCH_TIMEOUT: Duration = Duration::from_secs(10);
+        let (done, finished) = oneshot::channel();
+        if self
+            .request_tx
+            .send(ProxyRequest::SwitchBackend { backend, done })
+            .is_err()
+        {
+            return;
+        }
+        if tokio::time::timeout(SWITCH_TIMEOUT, finished)
+            .await
+            .is_err()
+        {
+            log::warn!("emulation backend switch timed out");
+        }
+    }
+
     async fn terminate(&mut self) {
         self.exit_requested.replace(true);
         self.request_tx
@@ -1535,6 +1587,10 @@ impl EmulationProxy {
 
 struct EmulationTask {
     backend: Option<input_emulation::Backend>,
+    /// A backend switch that arrived while a backend was still live:
+    /// parked by the session loop (or a create-stage wait), applied by
+    /// `run` right after the old backend unwinds.
+    pending_switch: Option<(Option<input_emulation::Backend>, oneshot::Sender<()>)>,
     exit_requested: Rc<Cell<bool>>,
     /// Shared cache; refreshed each time we (re)create the inner
     /// InputEmulation. Read by `EmulationProxy::display_bounds`.
@@ -1568,11 +1624,23 @@ impl EmulationTask {
             if self.exit_requested.get() {
                 break;
             }
+            // A backend switch parked while the previous backend was
+            // unwinding: apply it and rebuild right away.
+            if let Some((backend, done)) = self.pending_switch.take() {
+                self.backend = backend;
+                let _ = done.send(());
+                continue;
+            }
             // wait for reenable request
             loop {
                 match self.request_rx.recv().await.expect("channel closed") {
                     ProxyRequest::Reenable => break,
                     ProxyRequest::Terminate => return,
+                    ProxyRequest::SwitchBackend { backend, done } => {
+                        self.backend = backend;
+                        let _ = done.send(());
+                        break;
+                    }
                     ProxyRequest::Input(..) => { /* emulation inactive => ignore */ }
                     ProxyRequest::Remove(..) => { /* emulation inactive => ignore */ }
                     ProxyRequest::Forget(addr) => {
@@ -1605,6 +1673,7 @@ impl EmulationTask {
                 &mut self.request_rx,
                 &mut self.handles,
                 &mut self.post_processing,
+                &mut self.pending_switch,
             ) => return Ok(()),
         };
 
@@ -1679,6 +1748,7 @@ impl EmulationTask {
                     &mut self.request_rx,
                     &mut self.handles,
                     &mut self.post_processing,
+                    &mut self.pending_switch,
                 ) => return Ok(true),
             }
         }
@@ -1794,6 +1864,13 @@ impl EmulationTask {
                     }
                     ProxyRequest::Terminate => break Ok(()),
                     ProxyRequest::Reenable => continue,
+                    ProxyRequest::SwitchBackend { backend, done } => {
+                        // Park the switch and unwind this backend;
+                        // `run` applies it and rebuilds without waiting
+                        // for a re-enable.
+                        self.pending_switch = Some((backend, done));
+                        break Ok(())
+                    }
                 },
             }
         }
@@ -1820,10 +1897,18 @@ async fn wait_for_termination(
     rx: &mut Receiver<ProxyRequest>,
     handles: &mut HashMap<SocketAddr, EmulationHandle>,
     post_processing: &mut HashMap<SocketAddr, ReceivePostProcessing>,
+    pending_switch: &mut Option<(Option<input_emulation::Backend>, oneshot::Sender<()>)>,
 ) {
     loop {
         match rx.recv().await.expect("channel closed") {
             ProxyRequest::Terminate => return,
+            ProxyRequest::SwitchBackend { backend, done } => {
+                // Park and surface: exiting the wait tears the
+                // in-flight backend down and `run` rebuilds with the
+                // new selection.
+                *pending_switch = Some((backend, done));
+                return;
+            }
             ProxyRequest::Input(_, _) => continue,
             ProxyRequest::Remove(addr) => {
                 handles.remove(&addr);

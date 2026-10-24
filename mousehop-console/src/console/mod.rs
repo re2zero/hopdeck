@@ -95,6 +95,10 @@ pub struct Console {
     port_error: Option<SharedString>,
     capture: Status,
     emulation: Status,
+    /// Mirror of the daemon's input-emulation backend selection in its
+    /// config spelling (`Some("x11")`, …); `None` = automatic probing.
+    /// Pushed on sync and after every accepted backend switch.
+    emulation_backend: Option<String>,
     self_hostname: SharedString,
     search: Entity<InputState>,
     /// Debug log bar (design D14⑦): open/closed, the facade capture
@@ -263,6 +267,7 @@ impl Console {
             port_error: None,
             capture: Status::default(),
             emulation: Status::default(),
+            emulation_backend: None,
             self_hostname: self_hostname.into(),
             search,
             debug_open: false,
@@ -383,6 +388,13 @@ impl Console {
             }
             FrontendEvent::CaptureStatus(status) => self.capture = status,
             FrontendEvent::EmulationStatus(status) => self.emulation = status,
+            FrontendEvent::EmulationBackend(name) => {
+                self.journal(
+                    LogLevel::Info,
+                    format!("仿真后端 → {}", name.as_deref().unwrap_or("自动")),
+                );
+                self.emulation_backend = name;
+            }
             FrontendEvent::PublicKeyFingerprint(fp) => self.self_fingerprint = Some(fp),
             FrontendEvent::AuthorizedUpdated(keys) => {
                 // Once authorized the peer is past the gate; the badge

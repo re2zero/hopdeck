@@ -602,6 +602,19 @@ impl Config {
             .or(self.config_toml.as_ref().and_then(|c| c.emulation_backend))
     }
 
+    /// the CLI `--emulation-backend` override, if any. When set it wins
+    /// over config.toml, so a frontend backend switch is refused.
+    pub fn emulation_backend_override(&self) -> Option<EmulationBackend> {
+        self.args.emulation_backend
+    }
+
+    /// Persist the input-emulation backend selection (`None` = automatic
+    /// probing). The CLI override, when present, keeps precedence.
+    pub fn set_emulation_backend(&mut self, backend: Option<EmulationBackend>) {
+        let toml = self.config_toml.get_or_insert_with(Default::default);
+        toml.emulation_backend = backend;
+    }
+
     /// the port to use (initially)
     pub fn port(&self) -> u16 {
         self.args
