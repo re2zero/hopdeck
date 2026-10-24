@@ -17,13 +17,15 @@ mod layout;
 /// facade logger before the window exists.
 pub(crate) mod logbar;
 mod settings;
+#[cfg(all(test, feature = "ui-test-support"))]
+mod ui_tests;
 
 use crate::ipc::{FeedEvent, RequestWriter};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, AppContext, ClickEvent, Context, Div, Entity, Hsla,
     InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Window,
+    StatefulInteractiveElement, Styled, TestSupportExt, Window,
     assets::IconName,
     component::{
         ActiveTheme, Icon, Selectable, Sizable, TitleBar, WindowExt,
@@ -725,6 +727,7 @@ impl Console {
 
         h_flex()
             .id(("device-row", handle))
+            .test_support()
             .items_center()
             .gap_2()
             .px_2()

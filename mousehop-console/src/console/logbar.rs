@@ -9,7 +9,7 @@
 
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    StatefulInteractiveElement, Styled, TestSupportExt,
     assets::IconName,
     component::{ActiveTheme, Icon, Sizable, h_flex, v_flex},
     div, px,
@@ -256,6 +256,7 @@ impl Console {
 
         let body = div()
             .id("log-body")
+            .test_support()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()

@@ -4,7 +4,7 @@
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     AppContext, ClickEvent, Context, Div, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     assets::IconName,
     component::{
         ActiveTheme, Disableable, Icon, Sizable, WindowExt,
@@ -26,6 +26,7 @@ impl Console {
     pub(super) fn render_detail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("device-detail")
+            .test_support()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -143,7 +144,7 @@ impl Console {
                                     handle, *checked,
                                 ));
                             }
-                            entity.update(cx, |this, cx| {
+                            entity.update(cx, |this, _cx| {
                                 this.journal(
                                     super::logbar::LogLevel::Info,
                                     format!(

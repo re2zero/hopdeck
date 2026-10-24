@@ -8,7 +8,7 @@
 
 use gpui_kit::{
     App, ClickEvent, Context, Entity, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window,
+    SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     assets::IconName,
     component::{
         ActiveTheme, Icon, Selectable, Sizable,
@@ -78,6 +78,7 @@ impl Console {
                             .gap_1()
                             .child(self.render_self_section(cx))
                             .child(self.render_sharing_section(cx))
+                            .child(self.render_backend_section(cx))
                             .child(self.render_log_settings(cx)),
                     ),
             )
@@ -122,6 +123,94 @@ impl Console {
             section = section.child(self.render_peer_card(fp, peer, cx));
         }
         section
+    }
+
+    /// Input emulation backend (design 常规页「后端」区). The backend is
+    /// machine-global config — the daemon builds it once at startup from
+    /// `emulation_backend` and never re-reads it live — so this section
+    /// explains how to switch instead of offering a selector (no IPC
+    /// request exists for it), and spells out the USB/IP receiver setup
+    /// the M2b acceptance requires.
+    fn render_backend_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        v_flex()
+            .id("settings-backend")
+            .test_support()
+            .child(self.render_kv_section("后端", cx))
+            .child(
+                v_flex()
+                    .mt_1()
+                    .child(div().text_sm().child("输入仿真"))
+                    .child(div().text_xs().text_color(muted).child(
+                        "本机全局，写在 config.toml 的 emulation_backend（缺省自动探测 \
+                                 libei → layer-shell → X11）；修改后重启服务生效。",
+                    )),
+            )
+            .child(self.render_usbip_card(cx))
+    }
+
+    /// USB/IP is the compositor-free fallback (M1): injection at the
+    /// kernel's USB stack via a loopback USB/IP virtual HID device. It
+    /// is deliberately never auto-selected, so the card carries the
+    /// receiver-side preparation an operator must do first.
+    fn render_usbip_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let foreground = cx.theme().foreground;
+        let command = move |text: &'static str| {
+            div()
+                .text_xs()
+                .text_color(foreground)
+                .font_family(mono.clone())
+                .child(text.to_string())
+        };
+
+        v_flex()
+            .id("backend-usbip-card")
+            .test_support()
+            .mt_1()
+            .gap_1()
+            .p_3()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_md()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().child("USB/IP 注入（Linux）"))
+                    .child(super::chip(
+                        "需要接收端配置",
+                        cx.theme().warning.opacity(0.15),
+                        cx.theme().warning,
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("内核级注入，不依赖合成器支持（libei portal 不可用时的兜底）。启用步骤："),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("① 在被控的 Linux 机器上准备一次接收端（root，加载 vhci_hcd 并挂载虚拟 HID 设备）："),
+            )
+            .child(command("sudo scripts/usbip-receiver-setup.sh attach"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("② 写入同一台机器的 config.toml 并重启服务（该后端从不自动选中）："),
+            )
+            .child(command("emulation_backend = \"usbip\""))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("③ Windows 接收端需 usbip-win 系第三方驱动，属实验性。"),
+            )
     }
 
     fn render_peer_card(
