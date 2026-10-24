@@ -8,22 +8,12 @@
 Out of scope：per-client 后端选择（保持本机全局语义）、Windows USB/IP 客户端驱动打包（UI 标记实验性）、macOS 画面、mousehop-proto 输入协议语义改动。
 
 ## 里程碑
-- [ ] M1 USB/IP 注入后端 PoC（分支 `feat/usbip-emulation`）—— 验收：QEMU 接收端注入键盘+鼠标成功；真机 Wayland（GNOME 45+/KDE 6.1+）与 X11 交叉验证；关闭 libei portal 后注入仍生效；`scripts/usbip-receiver-setup.sh`（vhci-hcd 加载 + loopback attach）交付；`cargo test -p input-emulation` 与 `cargo clippy --workspace` 通过。**（2026-10-24 真机联调：UOS 25 真机 X11 交叉验证 ✅——vhci attach + 虚拟复合 HID 枚举 + 键盘 evdev 层 "hello world" DN/UP 全序列 + 鼠标经反向隧道注入真实桌面；无 portal 环境注入生效 ✅；唯一剩余 = 真机 Wayland 交叉验证（无 Wayland 测试机）。见 journal/REALMACHINE-REPORT.md）**
-- [x] M2a 连接层功能（2026-10-23 拆分；用户指示功能优先）—— 验收：ClientConfig 支持连接方式（直连 / 反向外呼 / 转发端口地址），daemon 拨号方向按配置执行；反向外呼场景两机可经单侧发起建立会话；`mousehop-cli` 可配置与验证；mousehop-proto 无变更。（增量一 e6d973b：ConnectMode 全链路 + 反向拨号/保活 + CLI；增量二 = M2a-ii：控制输入流走反向隧道，双实例 E2E 注入验证通过，见 journal/M2a-REPORT.md）
-- [ ] M2c 反向隧道转发（可选，公子 2026-10-24 提出需求；参考 dde-cooperation `tunnel` 分支）—— 验收：单向网络下受限侧把本地 TCP 连接经会话对端转发出去（目标支持 IP:端口与域名、出口侧路由白名单默认拒绝），流控内存有界、通道断线自恢复、会话断开即停，隧道满载时键鼠共享延迟无显著退化；设计蓝本 `.relay/DESIGN-m2c-tunnel-forward.md`（v1）。**（2026-10-24 实现收口 e07e45e：D34 拍板后当日落地，设计 v1 全按推荐实施——双实例 E2E 五项 ✅（A loopback 服务经隧道可达 + 4MB 传输 md5 一致 / 未授权 target 白名单拒绝（连接被重置）/ A 整杀重启后会话+隧道自动重建 / 会话未建立前隧道被拒 / 信用窗流控有界）；cargo test 110 全绿 + clippy 净（仅 D25⑤ 预存告警）；README/DOC/防火墙 xml 同步；真机欠账 = 单向网络真机复验（等下批真机联调））**
-- [ ] M2b GPUI 控制端 UI（设计稿 v2.2 已获公子确认，2026-10-23 启动实现）—— 验收：GPUI 应用（gpui-pre 0.3.9 + gpui-kit/ely 组件）完成设备添加与发现（自动扫描 / 手动 / 反向外呼三路径）+ 拖拽布局 + per-device 连接方式 + 发起一控多会话；接收端在 libei ↔ USB-IP 间切换后键鼠共享正常；GPUI 前端崩溃不影响 daemon；USB-IP 选项带「需要接收端配置」显式提示与可操作指引。开工前置：跑通 `Ely-GPUI-Components/compat/kit` 示例。**（2026-10-24 实现收口 + 真机联调：十二增量全落地；验收 7 项 = 6✅ + 项 5 真机版 X11↔USB-IP 双向热切后共享正常 ✅（字面 libei↔USB-IP 与 M1 的 Wayland 欠账同源）；Xvfb 图标欠账清（真机桌面 SVG 全渲染，花屏根因=老 GPU GL 路径，LIBGL_ALWAYS_SOFTWARE=1 修复）；GPUI 前端崩溃隔离 ✅；一控多三实例会话级冒烟 ✅。见 journal/M2b-REPORT.md 与 journal/REALMACHINE-REPORT.md）**
-- [ ] M3a 画面链路（可选，feature `video`，ely `RenderSurface` 显示）—— 验收：采集（PipeWire portal / DXGI）→ 硬编 → 独立通道 → 硬解 → RenderSurface 全链路可用，LAN 1080p 端到端 <150 ms；画面开关关闭后键鼠共享延迟与 CPU 占用对比 M2 基线无显著退化。
-- [ ] M3b 零拷贝渲染进程（可选进阶）—— 验收：独立 `mousehop-view` 进程（bite-gpui ^1.25 + gpui_interop 0.2.0）以 DMA-BUF/共享纹理导入显示，渲染路径无 CPU 像素拷贝；渲染进程崩溃不阻断键鼠与控制台。
-- 每个里程碑收尾：技术报告（实际 crate 版本、已知限制、验收差距、下一步建议）+ 交接三步（PLAN 勾选 → HANDOFF → 登记）。
 
+- [ ] M3a
 ## 当前焦点
-- 当前里程碑：**M1/M2a/M2b 真机联调收口（2026-10-24 会话 #11 续，公子授权测试机 uzero@10.8.15.62）**。三大里程碑的真机欠账除「真机 Wayland」外**全部清算**，报告 = `.relay/journal/REALMACHINE-REPORT.md`（D31）：
-  - 真实两机直连 + 反向外呼（B 拨入 A 收养）会话建立与真实桌面注入 ✅；USB/IP 真机全链（vhci attach → 虚拟复合 HID 枚举 → 键盘 evdev "hello world" 全序列 + 鼠标经隧道注入）✅；X11↔USB-IP 会话存活双向热切 ✅（M2b 验收项 5 真机版）；console 真机观感 ✅（`LIBGL_ALWAYS_SOFTWARE=1`，花屏根因 = Radeon HD 6450 老 GPU 的 GPUI GL 路径，Xvfb 图标之谜同案告破）。
-  - **真机新发现缺陷**：①反向启动竞速不自恢复（首拨 fatal alert 后保活心跳死槽、永不重拨——连接侧待修复）；②GPUI 老 GPU 花屏（软件 GL 缓解，上游相关）。
-  - 唯一剩余欠账：**真机 Wayland 交叉验证**（libei↔USB-IP 字面项与 M1 Wayland 项同源）——需 Wayland 测试机（GNOME 45+/KDE 6.1+），等公子安排。
-- **下一里程碑：M3a 画面链路（可选）**——设计蓝本已成文 `.relay/DESIGN-m3a-video.md`（v1，2026-10-24 会话 #12；D2/D5/D7 边界继承），含 4 个拍板项（D33），**拍板后实现**。验收：LAN 1080p 端到端 <150 ms；画面关闭后键鼠共享延迟与 CPU 对 M2 基线无显著退化。
-- **新增需求 M2c 反向隧道转发（2026-10-24 公子提出，与 M3a 并行不互阻）**——设计蓝本已成文 `.relay/DESIGN-m2c-tunnel-forward.md`（v1）：传输选型、帧协议、流控、路由规则配置（IP/CIDR/域名，出口侧解析）、安全模型、验收全案；含 4 个拍板项（D32），**拍板后实现**；实现前置 = 修 D31① 反向启动竞速缺陷。
-- 遗留待公子：① gpui-kit issues 上报（D29 延后至全部完成）；② console 自动重连语义（D27③）；③ 反向启动竞速缺陷是否排进连接侧增量（D31①）；④ Wayland 测试机安排。
+- 当前里程碑：**M3a 画面链路实现（增量推进，设计 D34 拍板「全按推荐」）**。进度：增量① `mousehop-video` crate **已落地**（2ecbf6d：capture dummy 彩条帧计数源 / yuv BGRA↔I420 / codec OpenH264 软编软解（解码毒化自愈）/ transport 分帧重组；17 单测+3 E2E 绿，clippy 净）；下一步 = 增量② proto `CAP_VIDEO=1<<3` + `VideoOffer`/`VideoStop` + 独立 UDP+DTLS video 通道（任务账本 T2，随后 T3 portal 采集 / T4 console RenderSurface / T5 PLI+parity）。验收：LAN 1080p 端到端 <150 ms（真机 HD 6450 走软编，D34 拍板项①）；画面关闭后键鼠共享延迟与 CPU 对 M2 基线无显著退化。
+- **M2c 反向隧道转发已收口**（e07e45e 实现六文件 ~2.3k 行 + D31① 竞速修复；双实例 E2E 五项全过，0a99daa 记账）；唯一欠账 = 真机 M2c 复验（等真机批次，与真机 Wayland 同批安排）。
+- 遗留待公子：① gpui-kit issues 上报（D29 延后至全部完成）；② console 自动重连语义（D27③）；③ Wayland 测试机安排（真机 Wayland 交叉验证 + M2c 真机复验）。
 
 ## 决策与死路（追加式）
 - 2026-10-22 初始化计划。
@@ -70,6 +60,8 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-24 [D34·公子拍板] M2c/M3a 两设计**全部按推荐方案实施，问题后续迭代**：M2c = 独立 TCP 隧道通道（4253/TCP）+ 域名按名匹配白名单 v1；M3a = 软编 OpenH264 基线+硬编增量 / PLI+可选 XOR parity / X11 XShM 不做 / reverse 拓扑 v1 无画面。实施顺序：**D31① 竞速修复 → M2c → M3a（增量，跨会话）**。
 
 - 2026-10-24 [D35·M2c 实现收口] 设计 v1 全按推荐落地（e07e45e，tunnel 模块六文件 + config + service 接线，~2.3k 行）。实现事实（防重蹈）：① **rustls provider 统一陷阱**：`tokio-rustls` 默认 features 拉入 `aws_lc_rs`，与 mousehop 的 `ring` 并存 → rustls 自动探测 panic（"Could not automatically determine the process-level CryptoProvider"，连坐 webrtc-dtls 0.12 内部的隐式 builder，表象=被控端 DTLS 握手静默 5s 超时循环）——**tokio-rustls 必须 `default-features = false, features = ["ring"]`**。② 出口侧会话门禁查 **ClientManager**（`get_client(ip)` + `state.alive` + `state.peer_fingerprint` 匹配隧道证书指纹）——控制端的反向会话活在**连接侧**（收养的发送路径），不在 listener 入站表；gate 初版接错簿记导致全拒。③ D31⑥ 单机冒烟需抑制：A 侧指向 B 的条目配**不可达端口**，否则 A 的自拨号抢走「无活跃传输」收养位、B 的真实会话被 hello 看门狗 5s 杀、系统振荡不收敛（真机单向拓扑天然抑制此混沌）。④ 会话 Pong 置 alive 前的首拨隧道会被门禁拒（~2s race），B 侧退避重拨自愈——符合「隧道随会话」设计。⑤ 半关闭映射：本地 EOF→CLOSE 帧，peer CLOSE→本地 write 半关；tokio「信用为零不读」天然背压（2c43cd97 教训在 tokio 语义下自动消解，无需 Qt 式补丁）。⑥ `Channel::close()`（abort IO 任务+清 inbox）供 forwarder 客户端删除时清理；流 id 奇偶切分 + 重复 OPEN 拒绝（28091a7b 教训）。⑦ forwards = 启动快照（ipc ClientConfig 不动、协议零变更），save_config 从快照回填防抹除，客户端删除时清快照防 Slab 句柄复用串扰；**改 forwards 需重启 daemon**（v1 已知限制，README 已注明）。v1 范围外（后续迭代候选）：UDP 转发、SOCKS 动态转发、透明子网拦截（dde-cooperation subnet-forward 路线）、forwards 热加载。
+
+- 2026-10-25 [D36·M3a 增量①] `mousehop-video` crate 落地（2ecbf6d，T1 验收 cargo test 绿）。语义定案：① **解码器毒化自愈**——任一解码失败→跳过非关键帧直到下一 IDR（openh264 `Error::native_code()` 即 DECODING_STATE 位集，dsRefLost=2 等可恢复态映射为 None；毒化即增量⑤ PLI 关键帧请求的触发钩子）；② **重组器顺序严格 + in_frame 状态**——缺口=丢帧计数+等 FIRST 重同步，迟到 LAST/mid 帧包直接忽略（防截断垃圾 AU 进解码器）；③ 测试策略——dummy 彩条源内嵌 16 位帧计数，解码像素读回断言端到端零错序/零丢失（不信任协议元数据）；丢包恢复测试用 720p（320x180 关键帧 <1200B 单包，注入丢包撕裂不了帧——禁止按编码字节尺寸写断言，用分辨率解耦）；彩条断言容差 ±2（编解码器舍入，黑条 G=1 属正常）。④ openh264 0.9.9：sys2 把 C 源码 vendored 进 crate（默认 source feature，cc 本地编译零网络）；Encoder 尺寸取自 YUVSource 并自动 reinit；DecodedYUV 实现 YUVSource（strides 可取）。⑤ D9 的 1.96.1 偏离已失效——1.95.0 已在本机就位（rustup channel 校验超时≠缺失）。
 
 ## 接力索引
 - 会话账本：`.relay/state.json`

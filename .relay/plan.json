@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "project": "deskgo-cross-device-collab",
+  "created": "2026-10-25T00:02:08+08:00",
+  "updated": "2026-10-25T00:02:19+08:00",
+  "milestones": [
+    {
+      "id": "M3a",
+      "title": "",
+      "acceptance": "",
+      "status": "active"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T1",
+      "title": "M3a① mousehop-video crate：dummy 彩条源+软编软解+分帧重组+环回 E2E",
+      "milestone": "M3a",
+      "status": "done",
+      "depends": [],
+      "verify": {
+        "type": "shell",
+        "cmd": "cargo test -p mousehop-video"
+      },
+      "attempts": 1,
+      "claimed_by": null,
+      "claimed_at": null,
+      "result": {
+        "exit": 0,
+        "tail": "upported yet for screen content, auto turned off\n[OpenH264] this = 0x0x7aca94002d40, Warning:ParamValidation(), BackgroundDetection(1) is not supported yet for screen content, auto turned off\n[OpenH264] this = 0x0x7aca94002d40, Warning:bEnableFrameSkip = 0,bitrate can't be controlled for RC_QUALITY_MODE,RC_BITRATE_MODE and RC_TIMESTAMP_MODE without enabling skip frame.\n   Doc-tests mousehop_video\n"
+      },
+      "created": "2026-10-25T00:02:08+08:00",
+      "updated": "2026-10-25T00:02:08+08:00"
+    },
+    {
+      "id": "T2",
+      "title": "M3a② proto CAP_VIDEO=1<<3 + VideoOffer/VideoStop + 独立 UDP+DTLS video 通道（daemon 接线，与输入 select 并列）",
+      "milestone": "M3a",
+      "status": "todo",
+      "depends": [],
+      "verify": {
+        "type": "manual",
+        "cmd": null
+      },
+      "attempts": 0,
+      "claimed_by": null,
+      "claimed_at": null,
+      "result": null,
+      "created": "2026-10-25T00:02:08+08:00",
+      "updated": "2026-10-25T00:02:08+08:00"
+    },
+    {
+      "id": "T3",
+      "title": "M3a③ PipeWire portal 采集后端（ashpd+pipewire-rs，RestoreToken 持久授权）",
+      "milestone": "M3a",
+      "status": "todo",
+      "depends": [],
+      "verify": {
+        "type": "manual",
+        "cmd": null
+      },
+      "attempts": 0,
+      "claimed_by": null,
+      "claimed_at": null,
+      "result": null,
+      "created": "2026-10-25T00:02:08+08:00",
+      "updated": "2026-10-25T00:02:08+08:00"
+    },
+    {
+      "id": "T4",
+      "title": "M3a④ console RenderSurface 挂接 + 画面开关 IPC",
+      "milestone": "M3a",
+      "status": "todo",
+      "depends": [],
+      "verify": {
+        "type": "manual",
+        "cmd": null
+      },
+      "attempts": 0,
+      "claimed_by": null,
+      "claimed_at": null,
+      "result": null,
+      "created": "2026-10-25T00:02:08+08:00",
+      "updated": "2026-10-25T00:02:08+08:00"
+    },
+    {
+      "id": "T5",
+      "title": "M3a⑤ PLI 关键帧重请求 + 可选 XOR parity（默认关）",
+      "milestone": "M3a",
+      "status": "todo",
+      "depends": [],
+      "verify": {
+        "type": "manual",
+        "cmd": null
+      },
+      "attempts": 0,
+      "claimed_by": null,
+      "claimed_at": null,
+      "result": null,
+      "created": "2026-10-25T00:02:08+08:00",
+      "updated": "2026-10-25T00:02:08+08:00"
+    }
+  ]
+}
