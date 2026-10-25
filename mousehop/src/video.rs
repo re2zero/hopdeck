@@ -340,6 +340,10 @@ mod imp {
         portal: portal_glue::Slot,
         /// Kills the accept loop, every send session and the capture.
         halt: CancellationToken,
+        /// Set by `halt`: the accept loop is gone for the process lifetime,
+        /// so the announced port is dead — `offer` stops advertising it
+        /// instead of promising pixels nothing will ever deliver.
+        halted: bool,
     }
 
     impl Host {
@@ -353,6 +357,7 @@ mod imp {
                 config,
                 portal: portal_glue::new_slot(),
                 halt: CancellationToken::new(),
+                halted: false,
             };
             if !config.enabled {
                 return disabled;
@@ -431,11 +436,12 @@ mod imp {
                 config,
                 portal,
                 halt,
+                halted: false,
             }
         }
 
         pub(super) fn offer(&self) -> Option<ProtoEvent> {
-            if self.port == 0 {
+            if self.port == 0 || self.halted {
                 return None;
             }
             // Portal geometry is announced only once the pump negotiated a
@@ -456,6 +462,7 @@ mod imp {
         }
 
         pub(super) fn halt(&mut self) {
+            self.halted = true;
             self.halt.cancel();
             portal_glue::stop(&self.portal);
         }
@@ -1096,5 +1103,27 @@ mod imp {
         }
         let _ = conn.close().await;
         log::info!("video: receive channel from {target} closed after {decoded_frames} frames");
+    }
+
+    #[cfg(test)]
+    mod host_halt {
+        use super::*;
+
+        /// A halted host must stop advertising its port: the accept loop is
+        /// gone for the process lifetime, so a fresh input session would
+        /// otherwise dial into a dead end (增量⑥, D38⑦).
+        #[test]
+        fn offer_stops_after_halt() {
+            let mut host = Host {
+                port: 4262,
+                config: VideoConfig::default(),
+                portal: portal_glue::new_slot(),
+                halt: CancellationToken::new(),
+                halted: false,
+            };
+            assert!(host.offer().is_some());
+            host.halt();
+            assert!(host.offer().is_none());
+        }
     }
 }
