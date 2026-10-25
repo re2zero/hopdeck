@@ -23,7 +23,7 @@ use gpui_kit::{
 use super::Console;
 use super::logbar::LogSink;
 use crate::ipc::FeedEvent;
-use mousehop_ipc::{ClientConfig, ClientState, FrontendEvent};
+use mousehop_ipc::{ClientConfig, ClientState, FrontendEvent, IncomingPeerConfig};
 
 /// Invalidate and complete a frame so fresh state and observations
 /// land in the last-frame registry the queries read.
@@ -120,6 +120,9 @@ fn settings_show_backend_section_with_usbip_guidance(cx: &mut TestAppContext) {
     cx.update_window(window, |_, window, cx| {
         content.update(cx, |console, _| console.settings_open = true);
         frame(window, cx);
+        // The backends section lives on the 高级 tab (design v2.2 nav).
+        click(window, "settings-tab-advanced".into(), cx);
+        frame(window, cx);
         require(window, "settings-backend".into());
         let card = require(window, "backend-usbip-card".into());
         assert!(card.visible());
@@ -167,6 +170,52 @@ fn clicking_device_row_selects_it(cx: &mut TestAppContext) {
         assert_eq!(selected, Some(7), "row click must select the device");
         frame(window, cx);
         require(window, "device-detail".into());
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn settings_panes_render_peer_card_controls(cx: &mut TestAppContext) {
+    // Regression: the settings scroll container used to lay its content
+    // out at content width, so the security pane's explainer line pushed
+    // the peer card wider than the pane and its right-aligned controls
+    // (revoke button, switches, sensitivity stepper) past the sheet's
+    // clip. The panes must keep every control inside the pane bounds.
+    let (window, content) = open_console(cx);
+    cx.update_window(window, |_, window, cx| {
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::AuthorizedUpdated(
+                    [("aa:bb".repeat(4), IncomingPeerConfig::default())]
+                        .into_iter()
+                        .collect(),
+                ))),
+                cx,
+            );
+            console.settings_open = true;
+        });
+        for (tab, ids) in [
+            (
+                super::settings::SettingsTab::Security,
+                vec![
+                    "settings-revoke-aa:bbaa:bbaa:bbaa:bb",
+                    "clip-aa:bbaa:bbaa:bbaa:bb",
+                    "sens-plus-aa:bbaa:bbaa:bbaa:bb",
+                ],
+            ),
+            (
+                super::settings::SettingsTab::Advanced,
+                vec!["backend-x11", "backend-usbip-card"],
+            ),
+            (super::settings::SettingsTab::Cloud, vec!["cloud-login"]),
+        ] {
+            content.update(cx, |console, _| console.settings_tab = tab);
+            frame(window, cx);
+            for id in &ids {
+                let snapshot = require(window, (*id).into());
+                assert!(snapshot.visible(), "{id:?} must be visible");
+            }
+        }
     })
     .unwrap();
 }

@@ -1783,6 +1783,12 @@ impl CaptureTask {
                     let cross_fraction = cursor_pos.map(|(pos, nx, ny)| match pos {
                         mousehop_proto::Position::Left | mousehop_proto::Position::Right => ny,
                         mousehop_proto::Position::Top | mousehop_proto::Position::Bottom => nx,
+                        // Corner handover seats at the mirrored corner.
+                        mousehop_proto::Position::TopLeft
+                        | mousehop_proto::Position::BottomLeft => nx,
+                        mousehop_proto::Position::TopRight
+                        | mousehop_proto::Position::BottomRight => 1.0 - nx,
+                        mousehop_proto::Position::Unplaced => 0.5,
                     });
                     (
                         serial,
@@ -2189,6 +2195,11 @@ fn to_capture_pos(pos: mousehop_ipc::Position) -> input_capture::Position {
         mousehop_ipc::Position::Right => input_capture::Position::Right,
         mousehop_ipc::Position::Top => input_capture::Position::Top,
         mousehop_ipc::Position::Bottom => input_capture::Position::Bottom,
+        mousehop_ipc::Position::TopLeft => input_capture::Position::TopLeft,
+        mousehop_ipc::Position::TopRight => input_capture::Position::TopRight,
+        mousehop_ipc::Position::BottomLeft => input_capture::Position::BottomLeft,
+        mousehop_ipc::Position::BottomRight => input_capture::Position::BottomRight,
+        mousehop_ipc::Position::Unplaced => input_capture::Position::Unplaced,
     }
 }
 
@@ -2198,6 +2209,11 @@ fn to_proto_pos(pos: input_capture::Position) -> mousehop_proto::Position {
         input_capture::Position::Right => mousehop_proto::Position::Right,
         input_capture::Position::Top => mousehop_proto::Position::Top,
         input_capture::Position::Bottom => mousehop_proto::Position::Bottom,
+        input_capture::Position::TopLeft => mousehop_proto::Position::TopLeft,
+        input_capture::Position::TopRight => mousehop_proto::Position::TopRight,
+        input_capture::Position::BottomLeft => mousehop_proto::Position::BottomLeft,
+        input_capture::Position::BottomRight => mousehop_proto::Position::BottomRight,
+        input_capture::Position::Unplaced => mousehop_proto::Position::Unplaced,
     }
 }
 

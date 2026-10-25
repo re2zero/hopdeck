@@ -8,6 +8,10 @@ fn is_within_dp_region(point: (i32, i32), display: &RECT) -> bool {
         Position::Right,
         Position::Top,
         Position::Bottom,
+        Position::TopLeft,
+        Position::TopRight,
+        Position::BottomLeft,
+        Position::BottomRight,
     ]
     .iter()
     .all(|&pos| is_within_dp_boundary(point, display, pos))
@@ -20,6 +24,13 @@ fn is_within_dp_boundary(point: (i32, i32), display: &RECT, pos: Position) -> bo
         Position::Right => display.right > x,
         Position::Top => display.top <= y,
         Position::Bottom => display.bottom > y,
+        // A corner is out of bounds only through both of its edges, and
+        // only on the corner-side half of the shared span.
+        Position::TopLeft => display.left > x && display.top > y,
+        Position::TopRight => display.right <= x && display.top > y,
+        Position::BottomLeft => display.left > x && display.bottom <= y,
+        Position::BottomRight => display.right <= x && display.bottom <= y,
+        Position::Unplaced => true,
     }
 }
 
@@ -61,6 +72,10 @@ pub(crate) fn entered_barrier(
     displays: &[RECT],
 ) -> Option<Position> {
     [
+        Position::TopLeft,
+        Position::TopRight,
+        Position::BottomLeft,
+        Position::BottomRight,
         Position::Left,
         Position::Right,
         Position::Top,

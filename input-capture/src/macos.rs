@@ -58,6 +58,10 @@ fn display_edge(position: Position) -> DisplayEdge {
         Position::Right => DisplayEdge::Right,
         Position::Top => DisplayEdge::Top,
         Position::Bottom => DisplayEdge::Bottom,
+        // Corners fold onto their vertical edge for layout projection.
+        Position::TopLeft | Position::BottomLeft => DisplayEdge::Left,
+        Position::TopRight | Position::BottomRight => DisplayEdge::Right,
+        Position::Unplaced => DisplayEdge::Left,
     }
 }
 
@@ -139,6 +143,33 @@ fn crosses_display_contour(
         Position::Right => delta.0 > 0.0 && location.0 >= f64::from(edge_point.0),
         Position::Top => delta.1 < 0.0 && location.1 <= f64::from(edge_point.1),
         Position::Bottom => delta.1 > 0.0 && location.1 >= f64::from(edge_point.1),
+        // A corner crossing requires motion toward the corner and past
+        // both of its edges.
+        Position::TopLeft => {
+            delta.0 < 0.0
+                && delta.1 < 0.0
+                && location.0 <= f64::from(edge_point.0)
+                && location.1 <= f64::from(edge_point.1)
+        }
+        Position::TopRight => {
+            delta.0 > 0.0
+                && delta.1 < 0.0
+                && location.0 >= f64::from(edge_point.0)
+                && location.1 <= f64::from(edge_point.1)
+        }
+        Position::BottomLeft => {
+            delta.0 < 0.0
+                && delta.1 > 0.0
+                && location.0 <= f64::from(edge_point.0)
+                && location.1 >= f64::from(edge_point.1)
+        }
+        Position::BottomRight => {
+            delta.0 > 0.0
+                && delta.1 > 0.0
+                && location.0 >= f64::from(edge_point.0)
+                && location.1 >= f64::from(edge_point.1)
+        }
+        Position::Unplaced => false,
     }
 }
 
@@ -156,6 +187,12 @@ fn capture_anchor(
         Position::Left => (edge.0.saturating_add(1), edge.1),
         Position::Top => (edge.0, edge.1.saturating_add(1)),
         Position::Right | Position::Bottom => edge,
+        // Diagonal nudge out of the corner.
+        Position::TopLeft => (edge.0.saturating_add(1), edge.1.saturating_add(1)),
+        Position::BottomLeft => (edge.0.saturating_add(1), edge.1.saturating_sub(1)),
+        Position::TopRight => (edge.0.saturating_sub(1), edge.1.saturating_add(1)),
+        Position::BottomRight => (edge.0.saturating_sub(1), edge.1.saturating_sub(1)),
+        Position::Unplaced => edge,
     };
     let anchor = if layout.rectangles().any(|(_, rect)| rect.contains(inward)) {
         inward

@@ -250,16 +250,41 @@ pub enum Position {
     Right,
     Top,
     Bottom,
+    /// The four canvas corners (console layout v3): a corner client is
+    /// triggered from the two adjacent screen edges near that corner.
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    /// Not on the layout canvas: no capture barrier is armed and the
+    /// emulation side never sends. Configs from older releases never
+    /// carry this value; the console's remove action writes it.
+    Unplaced,
 }
 
 impl Position {
+    /// The position across the host screen along the same axis. A
+    /// corner's opposite is the mirrored corner; `Unplaced` is its own
+    /// opposite (nothing to be across from).
     pub fn opposite(&self) -> Self {
         match self {
             Position::Left => Position::Right,
             Position::Right => Position::Left,
             Position::Top => Position::Bottom,
             Position::Bottom => Position::Top,
+            Position::TopLeft => Position::TopRight,
+            Position::TopRight => Position::TopLeft,
+            Position::BottomLeft => Position::BottomRight,
+            Position::BottomRight => Position::BottomLeft,
+            Position::Unplaced => Position::Unplaced,
         }
+    }
+
+    /// Whether this position arms a capture barrier / emulation route.
+    /// `Unplaced` devices stay in the device list but sit out of the
+    /// layout canvas entirely.
+    pub fn is_placed(self) -> bool {
+        self != Position::Unplaced
     }
 }
 
@@ -278,6 +303,11 @@ impl FromStr for Position {
             "right" => Ok(Self::Right),
             "top" => Ok(Self::Top),
             "bottom" => Ok(Self::Bottom),
+            "topleft" | "top-left" => Ok(Self::TopLeft),
+            "topright" | "top-right" => Ok(Self::TopRight),
+            "bottomleft" | "bottom-left" => Ok(Self::BottomLeft),
+            "bottomright" | "bottom-right" => Ok(Self::BottomRight),
+            "unplaced" => Ok(Self::Unplaced),
             _ => Err(PositionParseError { pos: s.into() }),
         }
     }
@@ -293,6 +323,11 @@ impl Display for Position {
                 Position::Right => "right",
                 Position::Top => "top",
                 Position::Bottom => "bottom",
+                Position::TopLeft => "top-left",
+                Position::TopRight => "top-right",
+                Position::BottomLeft => "bottom-left",
+                Position::BottomRight => "bottom-right",
+                Position::Unplaced => "unplaced",
             }
         )
     }
@@ -307,6 +342,11 @@ impl TryFrom<&str> for Position {
             "right" => Ok(Position::Right),
             "top" => Ok(Position::Top),
             "bottom" => Ok(Position::Bottom),
+            "top-left" => Ok(Position::TopLeft),
+            "top-right" => Ok(Position::TopRight),
+            "bottom-left" => Ok(Position::BottomLeft),
+            "bottom-right" => Ok(Position::BottomRight),
+            "unplaced" => Ok(Position::Unplaced),
             _ => Err(()),
         }
     }

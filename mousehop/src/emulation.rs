@@ -194,6 +194,11 @@ fn entry_edge(pos: Position) -> DisplayEdge {
         Position::Right => DisplayEdge::Right,
         Position::Top => DisplayEdge::Top,
         Position::Bottom => DisplayEdge::Bottom,
+        // Corner guests are entered through their vertical edge; the
+        // warp target carries the exact corner fraction.
+        Position::TopLeft | Position::BottomLeft => DisplayEdge::Left,
+        Position::TopRight | Position::BottomRight => DisplayEdge::Right,
+        Position::Unplaced => DisplayEdge::Left,
     }
 }
 
@@ -1078,6 +1083,14 @@ impl ListenTask {
                                         Position::Right => (DisplayEdge::Right, ny),
                                         Position::Top => (DisplayEdge::Top, nx),
                                         Position::Bottom => (DisplayEdge::Bottom, nx),
+                                        // Corner guests seat the cursor at
+                                        // the mirrored corner: project along
+                                        // the entry edge to the corner end.
+                                        Position::TopLeft => (DisplayEdge::Left, 0.0),
+                                        Position::BottomLeft => (DisplayEdge::Left, 1.0),
+                                        Position::TopRight => (DisplayEdge::Right, 0.0),
+                                        Position::BottomRight => (DisplayEdge::Right, 1.0),
+                                        Position::Unplaced => (DisplayEdge::Left, 0.5),
                                     };
                                     log::info!(
                                         "[cursor-pos] recv pos={pos:?} nx={nx:.3} ny={ny:.3} — projecting onto {edge:?} display contour"
@@ -1922,6 +1935,11 @@ fn to_ipc_pos(pos: Position) -> mousehop_ipc::Position {
         Position::Right => mousehop_ipc::Position::Right,
         Position::Top => mousehop_ipc::Position::Top,
         Position::Bottom => mousehop_ipc::Position::Bottom,
+        Position::TopLeft => mousehop_ipc::Position::TopLeft,
+        Position::TopRight => mousehop_ipc::Position::TopRight,
+        Position::BottomLeft => mousehop_ipc::Position::BottomLeft,
+        Position::BottomRight => mousehop_ipc::Position::BottomRight,
+        Position::Unplaced => mousehop_ipc::Position::Unplaced,
     }
 }
 

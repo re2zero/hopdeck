@@ -11,6 +11,7 @@
 //! journal plus the `log` facade, rendered above the status bar
 //! (`logbar.rs`).
 
+mod demo;
 mod detail;
 mod layout;
 /// `pub(crate)`: `main.rs` creates the shared sink and installs the
@@ -20,13 +21,14 @@ mod settings;
 #[cfg(all(test, feature = "ui-test-support"))]
 mod ui_tests;
 mod video;
+pub(crate) mod window_deco;
 
 use crate::ipc::{FeedEvent, RequestWriter};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, AppContext, ClickEvent, Context, Div, Entity, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, TestSupportExt, Window,
+    AnyWindowHandle, AppContext, ClickEvent, Context, Div, Entity, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
+    Styled, TestSupportExt, Window,
     assets::IconName,
     component::{
         ActiveTheme, Icon, Selectable, Sizable, TitleBar, WindowExt,
@@ -40,6 +42,7 @@ use gpui_kit::{
     div,
 };
 
+use self::detail::latency_label;
 use self::layout::DeviceDrag;
 use self::logbar::{LogLevel, LogSink};
 use mousehop_ipc::{
@@ -85,6 +88,8 @@ pub struct Console {
     authorized: HashMap<String, IncomingPeerConfig>,
     /// Whether the settings overlay (design D15) is open.
     settings_open: bool,
+    /// The open settings page (design v2.2's five-entry nav).
+    settings_tab: self::settings::SettingsTab,
     /// This device's public-key fingerprint (`PublicKeyFingerprint`,
     /// pushed by the daemon's `Sync`).
     self_fingerprint: Option<String>,
@@ -95,6 +100,9 @@ pub struct Console {
     /// Reusable password input for the access-password dialog (same
     /// window-less-context rationale as `auth_desc`).
     auth_password: Entity<InputState>,
+    /// The settings overlay's listen-port input (常规 pane); read on
+    /// apply, left untouched elsewhere.
+    port_input: Entity<InputState>,
     port: u16,
     port_error: Option<SharedString>,
     capture: Status,
@@ -207,6 +215,11 @@ fn position_label(pos: Position) -> &'static str {
         Position::Right => "右侧",
         Position::Top => "上方",
         Position::Bottom => "下方",
+        Position::TopLeft => "左上角",
+        Position::TopRight => "右上角",
+        Position::BottomLeft => "左下角",
+        Position::BottomRight => "右下角",
+        Position::Unplaced => "未布置",
     }
 }
 
@@ -249,6 +262,7 @@ impl Console {
         let auth_desc =
             cx.new(|cx| InputState::new(window, cx).placeholder("备注名，如 书房笔记本"));
         let auth_password = cx.new(|cx| InputState::new(window, cx).placeholder("访问密码"));
+        let port_input = cx.new(|cx| InputState::new(window, cx).placeholder("如 4242，留空不动"));
 
         let self_hostname = hostname::get()
             .map(|h| h.to_string_lossy().into_owned())
@@ -256,7 +270,7 @@ impl Console {
 
         let log_level = logbar::initial_level();
         let video_tx = video::spawn_tick_pump(cx);
-        let console = Self {
+        let mut console = Self {
             feed: FeedState::Connecting,
             writer: None,
             clients: Vec::new(),
@@ -270,9 +284,11 @@ impl Console {
             edit: None,
             authorized: HashMap::new(),
             settings_open: false,
+            settings_tab: self::settings::SettingsTab::General,
             self_fingerprint: None,
             auth_desc,
             auth_password,
+            port_input,
             port: 0,
             port_error: None,
             capture: Status::default(),
@@ -290,11 +306,20 @@ impl Console {
         };
         console.spawn_log_poll(cx);
         console.journal(LogLevel::Info, "控制台启动");
+        if demo::enabled() {
+            console.apply_demo_data(cx);
+        }
         console
     }
 
     /// Entry point for everything the IPC layer observes.
     pub fn on_feed(&mut self, event: FeedEvent, cx: &mut Context<Self>) {
+        // Demo mode is a closed dataset injected in `new`: live events
+        // (a leftover daemon's `Sync` overwrite, or a disconnect wipe)
+        // would clobber it, so the feed is ignored entirely.
+        if demo::enabled() {
+            return;
+        }
         match event {
             FeedEvent::Connected(writer) => {
                 self.feed = FeedState::Connected;
@@ -726,6 +751,11 @@ impl Console {
         .detach();
     }
 
+    fn is_connected(&self) -> bool {
+        matches!(self.feed, FeedState::Connected)
+    }
+
+    /// Feed state wording for the status bar's disconnected segment.
     fn feed_label(&self) -> SharedString {
         match &self.feed {
             FeedState::Connecting => "正在连接服务…".into(),
@@ -735,30 +765,51 @@ impl Console {
         }
     }
 
-    fn is_connected(&self) -> bool {
-        matches!(self.feed, FeedState::Connected)
-    }
-
-    fn render_presence_dot(&self, online: bool, cx: &mut Context<Self>) -> impl IntoElement {
-        let color = if online {
-            cx.theme().success
-        } else {
-            cx.theme().muted_foreground
-        };
-        presence_dot(color)
-    }
-
-    fn render_shell(&self, visible: &[DeviceEntry], cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_shell(
+        &self,
+        visible: &[DeviceEntry],
+        resize_zones: Option<gpui_kit::AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // Bare drag strip: the window manager already identifies the
+            // app (公子: 标题没必要). The minimize/maximize/close buttons
+            // are drawn here rather than relying on the platform's
+            // window_controls(), which not every backend reports.
             .child(
                 TitleBar::new().child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Mousehop 控制台"),
+                    h_flex()
+                        .ml_auto()
+                        .items_center()
+                        .gap_1()
+                        .pr_2()
+                        .child(
+                            Button::new("win-minimize")
+                                .icon(Icon::new(IconName::WindowMinimize))
+                                .ghost()
+                                .on_click(cx.listener(|_, _: &ClickEvent, window, _| {
+                                    window.minimize_window();
+                                })),
+                        )
+                        .child(
+                            Button::new("win-maximize")
+                                .icon(Icon::new(IconName::WindowMaximize))
+                                .ghost()
+                                .on_click(cx.listener(|_, _: &ClickEvent, window, _| {
+                                    window.zoom_window();
+                                })),
+                        )
+                        .child(
+                            Button::new("win-close")
+                                .icon(Icon::new(IconName::X))
+                                .ghost()
+                                .on_click(cx.listener(|_, _: &ClickEvent, window, _| {
+                                    window.remove_window();
+                                })),
+                        ),
                 ),
             )
             .child(self.render_main(visible, cx))
@@ -766,21 +817,23 @@ impl Console {
                 shell.child(self.render_log_bar(cx))
             })
             .child(self.render_status_bar(cx))
+            // Painted last so the edge bands sit above all content.
+            .when_some(resize_zones, |shell, zones| shell.child(zones))
     }
 
     fn render_main(&self, visible: &[DeviceEntry], cx: &mut Context<Self>) -> impl IntoElement {
+        // Settings is a page, not an overlay (公子: 避免浮层 hover 泄漏
+        // 到背后的设备行): the two-pane area is swapped out entirely.
+        if self.settings_open {
+            return self.render_settings_page(cx).into_any_element();
+        }
         h_flex()
             .flex_1()
             .min_h_0()
-            .relative()
             .items_stretch()
             .child(self.render_device_panel(visible, cx))
             .child(self.render_detail_panel(cx))
-            // The settings overlay covers the two-pane area but not the
-            // title bar (design v2.2's `inset: 38px 0 0 0`).
-            .when(self.settings_open, |main| {
-                main.child(self.render_settings_overlay(cx))
-            })
+            .into_any_element()
     }
 
     fn render_device_panel(
@@ -788,13 +841,20 @@ impl Console {
         visible: &[DeviceEntry],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
         v_flex()
             .w_72()
             .flex_shrink_0()
             .min_h_0()
             .border_r_1()
             .border_color(cx.theme().border)
-            .child(div().p_2().child(Input::new(&self.search).small()))
+            .child(
+                div().p_2().child(
+                    Input::new(&self.search)
+                        .small()
+                        .prefix(Icon::new(IconName::Search).small().text_color(muted)),
+                ),
+            )
             .child(self.render_device_list(visible, cx))
             .child(self.render_self_bar(cx))
     }
@@ -804,21 +864,52 @@ impl Console {
         visible: &[DeviceEntry],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let rows: Vec<AnyElement> = if visible.is_empty() {
-            vec![self.render_empty_list(cx).into_any_element()]
+        let muted = cx.theme().muted_foreground;
+        let mut body = v_flex().p_2().gap_1();
+        if self.clients.is_empty() {
+            body = body.child(self.render_empty_list(cx).into_any_element());
+        } else if visible.is_empty() {
+            // design v2.2's filtered empty state: a label plus the
+            // direct-connect hint.
+            body = body
+                .child(
+                    div()
+                        .px_1()
+                        .py_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("无匹配设备"),
+                )
+                .child(
+                    div()
+                        .px_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child("输入对方 IP 回车，可直接发起连接。"),
+                );
         } else {
-            visible
-                .iter()
-                .map(|entry| self.render_device_row(entry, cx).into_any_element())
-                .collect()
-        };
+            body = body
+                .child(
+                    div()
+                        .px_1()
+                        .py_1()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("局域网 · {}", visible.len())),
+                )
+                .children(
+                    visible
+                        .iter()
+                        .map(|entry| self.render_device_row(entry, cx).into_any_element()),
+                );
+        }
 
         div()
             .id("device-list")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .child(v_flex().p_2().gap_1().children(rows))
+            .child(body)
     }
 
     fn render_empty_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -844,8 +935,8 @@ impl Console {
             .items_center()
             .gap_2()
             .px_2()
-            .py_1()
-            .rounded_sm()
+            .py_1p5()
+            .rounded_md()
             .text_sm()
             .when(selected, |row| row.bg(cx.theme().secondary))
             .hover(|row| row.bg(cx.theme().secondary_hover))
@@ -863,20 +954,40 @@ impl Console {
                 },
                 |drag, _, _, cx| cx.new(|_| drag.clone()),
             )
-            .child(self.render_presence_dot(online, cx))
+            .child(
+                h_flex()
+                    .size_7()
+                    .flex_shrink_0()
+                    .rounded_md()
+                    .bg(cx.theme().secondary)
+                    .when(selected, |box_| box_.bg(cx.theme().background))
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        Icon::new(IconName::Monitor)
+                            .small()
+                            .text_color(cx.theme().secondary_foreground),
+                    ),
+            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .child(
-                        div()
-                            .text_color(if online {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .truncate()
-                            .child(name),
+                        h_flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(self.render_presence_dot(online, entry, cx))
+                            .child(
+                                div()
+                                    .text_color(if online {
+                                        cx.theme().foreground
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .truncate()
+                                    .child(name),
+                            ),
                     )
                     .child(
                         div()
@@ -886,7 +997,48 @@ impl Console {
                             .child(addr),
                     ),
             )
-            .child(self.render_row_chips(entry, cx))
+            .child(self.render_row_tail(entry, cx))
+    }
+
+    /// Row status dot: green online, amber parked at the authorization
+    /// gate, accent while dialing, muted offline — design v2.2's
+    /// `.mh-dot` color code (the row carries no status pill).
+    fn render_presence_dot(
+        &self,
+        online: bool,
+        entry: &DeviceEntry,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let color = if online {
+            cx.theme().success
+        } else if self.awaiting_authorization(entry) {
+            cx.theme().warning
+        } else if entry.state.resolving || self.dial_in_flight(entry) {
+            cx.theme().accent
+        } else {
+            cx.theme().muted_foreground
+        };
+        presence_dot(color)
+    }
+
+    /// Right-aligned row tail: the live latency for an online device,
+    /// the interim state word otherwise (design keeps the pill out of
+    /// the list; the dot carries the state).
+    fn render_row_tail(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+        let mono = cx.theme().mono_font_family.clone();
+        let muted = cx.theme().muted_foreground;
+        let mut tail = div().flex_shrink_0().text_xs();
+        if entry.online() {
+            tail = tail
+                .text_color(muted)
+                .font_family(mono)
+                .child(latency_label(&entry.state));
+        } else if self.awaiting_authorization(entry) {
+            tail = tail.text_color(cx.theme().warning).child("待认证");
+        } else if entry.state.resolving || self.dial_in_flight(entry) {
+            tail = tail.text_color(muted).child("连接中");
+        }
+        tail
     }
 
     /// Row/header status chip: online, then parked at the local
@@ -925,24 +1077,17 @@ impl Console {
         })
     }
 
-    /// Right-aligned status chips: connection state plus the reverse
-    /// dial marker (direct stays unlabeled — it is the quiet default).
-    fn render_row_chips(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
-        let mut chips = h_flex().gap_1().flex_shrink_0();
-        let (label, tone) = self.status_chip(entry, cx);
-        chips = chips.child(chip(label, tone.opacity(0.15), tone));
-        if entry.config.connect_mode == ConnectMode::Reverse {
-            chips = chips.child(chip(
-                entry.connect_mode_label(),
-                cx.theme().secondary,
-                cx.theme().secondary_foreground,
-            ));
-        }
-        chips
-    }
-
+    /// Left-bottom self bar (design v2.2's `.mh-self`): the local
+    /// device's name plus a `本机 · fp …` subtitle and the settings
+    /// gear.
     fn render_self_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let accent = cx.theme().accent;
+        let subtitle = match &self.self_fingerprint {
+            Some(fp) => format!("本机 · fp {}", short_self_fingerprint(fp)),
+            None => "本机".to_string(),
+        };
         h_flex()
             .items_center()
             .gap_2()
@@ -951,20 +1096,34 @@ impl Console {
             .border_t_1()
             .border_color(cx.theme().border)
             .flex_shrink_0()
-            .child(Icon::new(IconName::Monitor).small().text_color(muted))
             .child(
-                div()
+                h_flex()
+                    .size_8()
+                    .flex_shrink_0()
+                    .rounded_md()
+                    .bg(accent.opacity(0.12))
+                    .items_center()
+                    .justify_center()
+                    .child(Icon::new(IconName::Monitor).small().text_color(accent)),
+            )
+            .child(
+                v_flex()
                     .flex_1()
                     .min_w_0()
-                    .text_sm()
-                    .truncate()
-                    .child(self.self_hostname.clone()),
+                    .child(div().text_sm().truncate().child(self.self_hostname.clone()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .font_family(mono)
+                            .truncate()
+                            .child(subtitle),
+                    ),
             )
             .child(
                 Button::new("open-settings")
                     .icon(Icon::new(IconName::Settings))
                     .ghost()
-                    .small()
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                         this.settings_open = true;
                         cx.notify();
@@ -981,30 +1140,64 @@ impl Console {
             .child(self.render_layout_canvas(cx))
     }
 
+    /// Status bar (design v2.2's `.mh-statusbar`): identity + backends
+    /// on the left, device count, the cloud placeholder and the log /
+    /// settings buttons on the right.
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
         let status_text = move |text: SharedString| div().text_xs().text_color(muted).child(text);
         let capture_on = bool::from(self.capture);
         let emulation_on = bool::from(self.emulation);
+        let backend = self
+            .emulation_backend
+            .as_deref()
+            .unwrap_or("自动")
+            .to_string();
 
         StatusBar::new()
             .flex_shrink_0()
-            .left(self.render_presence_dot(self.is_connected(), cx))
-            .left(status_text(self.feed_label()))
-            .left(status_text(
-                format!("采集 {}", if capture_on { "开" } else { "关" }).into(),
-            ))
-            .left(status_text(
-                format!("注入 {}", if emulation_on { "开" } else { "关" }).into(),
-            ))
-            .right(status_text(match (self.port, &self.port_error) {
-                (0, None) => "端口未知".into(),
-                (port, None) => format!("UDP 端口 {port}").into(),
-                (port, Some(error)) => format!("端口 {port}：{error}").into(),
+            .left(presence_dot(if self.is_connected() {
+                cx.theme().success
+            } else {
+                cx.theme().muted_foreground
             }))
+            .left(status_text(self.self_hostname.clone()))
+            // The design's status bar is a connected-state mock; the
+            // disconnected reason still needs a home (D27③), so it
+            // replaces the port segment while the feed is down.
+            .left(if self.is_connected() {
+                status_text(match (self.port, &self.port_error) {
+                    (0, None) => "端口未就绪".into(),
+                    (port, None) => format!(":{port}").into(),
+                    (port, Some(error)) => format!(":{port} {error}").into(),
+                })
+                .into_any_element()
+            } else {
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().danger)
+                    .child(self.feed_label())
+                    .into_any_element()
+            })
+            .left(status_text(
+                format!(
+                    "仿真 {}{} · 捕获 {}",
+                    backend,
+                    if emulation_on { "" } else { "（关）" },
+                    if capture_on { "开" } else { "关" }
+                )
+                .into(),
+            ))
             .right(status_text(
                 format!("设备 {} 台", self.clients.len()).into(),
             ))
+            .right(
+                h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(presence_dot(muted))
+                    .child(status_text("云服务未配置".into())),
+            )
             .right(
                 Button::new("toggle-debug-log")
                     .icon(Icon::new(IconName::Bug))
@@ -1051,6 +1244,16 @@ fn short_fingerprint(fp: &str) -> &str {
     fp.get(..20).unwrap_or(fp)
 }
 
+/// The self-bar fingerprint hint, design v2.2's `fp 77:b1:77…9a:2e`:
+/// first three hex groups, ellipsis, last group.
+fn short_self_fingerprint(fp: &str) -> String {
+    let groups: Vec<&str> = fp.split(':').collect();
+    match groups.as_slice() {
+        [a, b, c, .., last] if groups.len() > 4 => format!("{a}:{b}:{c}…{last}"),
+        _ => fp.to_string(),
+    }
+}
+
 /// Parse a direct-connect query: a bare IP, or an `ip:port` pair
 /// (brackets required around IPv6 with a port). Hostnames are not
 /// dialed — the daemon's candidate list is IP-based.
@@ -1069,11 +1272,18 @@ fn parse_direct_address(query: &str) -> Option<(IpAddr, u16)> {
 }
 
 impl Render for Console {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Expire authorization knocks the daemon stopped refreshing:
-        // the peer gave up or the dialog was declined.
-        self.awaiting_auth
-            .retain(|_, at| at.elapsed() < AUTH_KNOCK_TTL);
+        // the peer gave up or the dialog was declined. Demo mode has no
+        // daemon to re-fire its scripted knock, so it stays fresh.
+        if demo::enabled() {
+            if let Some(at) = self.awaiting_auth.get_mut(demo::FP_OPS) {
+                *at = std::time::Instant::now();
+            }
+        } else {
+            self.awaiting_auth
+                .retain(|_, at| at.elapsed() < AUTH_KNOCK_TTL);
+        }
         let filter = self.search.read(cx).value().to_lowercase();
         let visible: Vec<DeviceEntry> = if filter.is_empty() {
             self.clients.clone()
@@ -1084,7 +1294,8 @@ impl Render for Console {
                 .cloned()
                 .collect()
         };
-        self.render_shell(&visible, cx)
+        let resize_zones = window_deco::resize_zone_overlay(window).map(|e| e.into_any_element());
+        self.render_shell(&visible, resize_zones, cx)
     }
 }
 

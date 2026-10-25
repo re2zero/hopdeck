@@ -13,21 +13,19 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     ClickEvent, Context, Div, Hsla, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Window,
+    assets::IconName,
     component::{
-        ActiveTheme, Sizable, WindowExt,
+        ActiveTheme, Icon, WindowExt,
         button::{Button, ButtonVariants},
         h_flex,
         notification::Notification,
         v_flex,
     },
-    div,
+    div, px,
 };
 use mousehop_ipc::{ClientHandle, FrontendRequest, Position};
 
 use super::{Console, DeviceEntry, position_label};
-
-/// How many devices fit on the canvas's top row.
-const TOP_SLOTS: usize = 3;
 
 /// The value carried from a list row to a canvas slot during a drag:
 /// identity for the drop handler, plus what the floating ghost renders.
@@ -59,37 +57,82 @@ impl Render for DeviceDrag {
     }
 }
 
+/// Every placeable canvas position, row-major (公子: 下方 3 格全开放，
+/// 控制方向含四角).
+#[cfg(test)]
+pub(super) const CANVAS_SLOTS: [Position; 8] = [
+    Position::TopLeft,
+    Position::Top,
+    Position::TopRight,
+    Position::Left,
+    Position::Right,
+    Position::BottomLeft,
+    Position::Bottom,
+    Position::BottomRight,
+];
+
 /// Why a placement is rejected, surfaced as a toast.
 #[derive(Debug, PartialEq, Eq)]
 enum PlacementRejection {
-    /// Left/right/bottom hold a single device.
+    /// Each canvas slot holds exactly one device.
     SlotOccupied,
-    /// The top row's three slots are taken.
-    TopFull,
 }
 
 /// The guard behind drop handling: `None` places the device, `Some` is
-/// the rejection reason. `occupant_count` excludes the dragged device
-/// itself (re-dropping onto its own slot is a silent no-op before this).
-fn placement_rejection(pos: Position, occupant_count: usize) -> Option<PlacementRejection> {
-    match pos {
-        Position::Top if occupant_count >= TOP_SLOTS => Some(PlacementRejection::TopFull),
-        Position::Top => None,
-        _ if occupant_count > 0 => Some(PlacementRejection::SlotOccupied),
-        _ => None,
-    }
+/// the rejection reason. Re-dropping onto its own slot is a silent
+/// no-op before this.
+fn placement_rejection(occupant_count: usize) -> Option<PlacementRejection> {
+    (occupant_count > 0).then_some(PlacementRejection::SlotOccupied)
 }
 
 /// Colored bar on the canvas edge where the device takes over the cursor
 /// (design's `.mh-edge`): a `Left` device sits left of the host, so its
-/// box lights the edge facing the host.
+/// box lights the edge facing the host. The design centers the bar at
+/// 52% of the slot edge — approximated with a fixed inset.
 fn edge_bar(pos: Position, color: Hsla) -> Div {
-    let base = div().absolute().bg(color);
+    let vertical = |side_right: bool| {
+        let bar = div().absolute().bg(color).top_3().bottom_3().w_1();
+        if side_right {
+            bar.right_0()
+        } else {
+            bar.left_0()
+        }
+    };
+    let horizontal = |side_bottom: bool| {
+        let bar = div().absolute().bg(color).left_3().right_3().h_1();
+        if side_bottom {
+            bar.bottom_0()
+        } else {
+            bar.top_0()
+        }
+    };
     match pos {
-        Position::Left => base.right_0().top_0().bottom_0().w_1(),
-        Position::Right => base.left_0().top_0().bottom_0().w_1(),
-        Position::Top => base.bottom_0().left_0().right_0().h_1(),
-        Position::Bottom => base.top_0().left_0().right_0().h_1(),
+        // Corners light both adjacent edges.
+        Position::TopLeft => div()
+            .absolute()
+            .inset_0()
+            .child(vertical(false))
+            .child(horizontal(false)),
+        Position::TopRight => div()
+            .absolute()
+            .inset_0()
+            .child(vertical(true))
+            .child(horizontal(false)),
+        Position::BottomLeft => div()
+            .absolute()
+            .inset_0()
+            .child(vertical(false))
+            .child(horizontal(true)),
+        Position::BottomRight => div()
+            .absolute()
+            .inset_0()
+            .child(vertical(true))
+            .child(horizontal(true)),
+        Position::Left => vertical(false),
+        Position::Right => vertical(true),
+        Position::Top => horizontal(false),
+        Position::Bottom => horizontal(true),
+        Position::Unplaced => div().absolute(),
     }
 }
 
@@ -116,7 +159,7 @@ impl Console {
                             .justify_end()
                             .text_xs()
                             .text_color(muted)
-                            .child("把左侧设备拖到本机屏幕四周 · 上排最多 3 块"),
+                            .child("拖入空格设为共享屏 · 四角与四边共 8 个方位"),
                     ),
             )
             .child(
@@ -127,80 +170,84 @@ impl Console {
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().secondary.opacity(0.35))
-                    .child(self.render_top_row(cx))
-                    .child(self.render_mid_row(cx))
-                    .child(self.render_bottom_row(cx)),
+                    // Fixed row heights, not flex equalization: flex_1
+                    // rows let content pull rows apart (公子: 有设备时
+                    // 高度没有保持). 76px × 3 + gaps + padding = 260.
+                    .child(self.render_top_row(cx).h(px(76.)).flex_shrink_0())
+                    .child(self.render_mid_row(cx).h(px(76.)).flex_shrink_0())
+                    .child(self.render_bottom_row(cx).h(px(76.)).flex_shrink_0()),
             )
     }
 
+    /// The canvas is a 3×3 grid: the host screen in the center, three
+    /// slots on the top edge, one each left/right, and the bottom
+    /// middle — the two lower corners stay disabled (公子: 九宫格，
+    /// 左下右下禁掉即可得 1-6). Each cell holds the devices assigned
+    /// to its position; empty cells are drop targets.
     fn render_top_row(&self, cx: &mut Context<Self>) -> Div {
-        let mut row = h_flex().gap_2().min_h_12().items_stretch();
-        let placed = self.clients_at(Position::Top);
-        for entry in &placed {
-            row = row.child(self.render_placed_box(entry, cx));
-        }
-        if placed.len() < TOP_SLOTS {
-            row = row.child(self.render_dropzone(Position::Top, cx));
-        }
-        row
+        self.render_slot_row([Position::TopLeft, Position::Top, Position::TopRight], cx)
     }
 
     fn render_mid_row(&self, cx: &mut Context<Self>) -> Div {
         h_flex()
             .gap_2()
-            .min_h_24()
             .items_stretch()
-            .child(self.render_side_slot(Position::Left, cx))
+            .child(self.render_slot_cell(Position::Left, cx))
             .child(self.render_host_box(cx))
-            .child(self.render_side_slot(Position::Right, cx))
+            .child(self.render_slot_cell(Position::Right, cx))
     }
 
     fn render_bottom_row(&self, cx: &mut Context<Self>) -> Div {
-        h_flex()
-            .min_h_12()
-            .items_stretch()
-            .child(self.render_side_slot(Position::Bottom, cx))
+        // 公子: 下方 3 格全开放 — all eight surrounding slots take a
+        // device, corners included.
+        self.render_slot_row(
+            [
+                Position::BottomLeft,
+                Position::Bottom,
+                Position::BottomRight,
+            ],
+            cx,
+        )
     }
 
-    /// Every device currently sitting on one side. Legacy configs may
-    /// list more than a slot holds — they all render (packed) rather
-    /// than hiding state; new placements are guarded instead.
-    fn clients_at(&self, pos: Position) -> Vec<&DeviceEntry> {
-        self.clients
-            .iter()
-            .filter(|entry| entry.config.pos == pos)
-            .collect()
-    }
-
-    /// One side of the mid/bottom rows: the placed device boxes, or an
-    /// empty dropzone. The slot itself is a passive wrapper — drop and
-    /// highlight live on the boxes inside so occupied slots stay
-    /// drop targets (they answer with the rejection toast).
-    fn render_side_slot(&self, pos: Position, cx: &mut Context<Self>) -> Div {
-        let occupants = self.clients_at(pos);
-        let mut slot = h_flex().flex_1().min_w_0().gap_2().items_stretch();
-        if occupants.is_empty() {
-            slot = slot.child(self.render_dropzone(pos, cx));
-        } else {
-            for entry in occupants {
-                slot = slot.child(self.render_placed_box(entry, cx));
-            }
+    fn render_slot_row<const N: usize>(&self, slots: [Position; N], cx: &mut Context<Self>) -> Div {
+        let mut row = h_flex().gap_2().items_stretch();
+        for pos in slots {
+            row = row.child(self.render_slot_cell(pos, cx));
         }
-        slot
+        row
+    }
+
+    /// One grid cell: the device assigned to `pos`, or a dropzone.
+    fn render_slot_cell(&self, pos: Position, cx: &mut Context<Self>) -> Div {
+        match self.clients.iter().find(|client| client.config.pos == pos) {
+            Some(entry) => div()
+                .flex_1()
+                .min_w_0()
+                .child(self.render_placed_box(entry, cx)),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .child(self.render_dropzone(pos, cx)),
+        }
     }
 
     fn render_dropzone(&self, pos: Position, cx: &mut Context<Self>) -> impl IntoElement {
-        let label = position_label(pos);
         let accent = cx.theme().accent;
+        // Same skeleton — and the same cell size — as the host box
+        // (公子: 九宫格框始终保持与本机同宽高): dashed accent marks the
+        // cell as free, solid accent on hover.
         h_flex()
-            .flex_1()
+            .h_full()
+            .w_full()
             .min_w_0()
             .items_center()
             .justify_center()
             .rounded_md()
             .border_1()
             .border_dashed()
-            .border_color(cx.theme().border)
+            .border_color(accent.opacity(0.45))
+            .bg(cx.theme().secondary)
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .drag_over::<DeviceDrag>(move |style, _, _, _| {
@@ -212,7 +259,12 @@ impl Console {
             .on_drop(cx.listener(move |this, drag: &DeviceDrag, window, cx| {
                 this.place_device(drag.handle, pos, window, cx);
             }))
-            .child(format!("{label} · 拖设备到此"))
+            .child(format!(
+                "+ 拖入设为{}",
+                position_label(pos)
+                    .trim_end_matches('侧')
+                    .trim_end_matches('方')
+            ))
     }
 
     fn render_placed_box(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> impl IntoElement {
@@ -239,8 +291,10 @@ impl Console {
 
         v_flex()
             .id(("layout-slot", handle))
+            .h_full()
             .flex_1()
             .min_w_0()
+            .items_center()
             .justify_center()
             .gap_0p5()
             .px_3()
@@ -248,8 +302,8 @@ impl Console {
             .overflow_hidden()
             .rounded_md()
             .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
+            .border_color(accent.opacity(0.5))
+            .bg(cx.theme().secondary)
             .when(!online || !active, |box_| box_.opacity(0.6))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -260,8 +314,24 @@ impl Console {
             .on_drop(cx.listener(move |this, drag: &DeviceDrag, window, cx| {
                 this.place_device(drag.handle, pos, window, cx);
             }))
-            .child(div().text_sm().text_color(fg).truncate().child(name))
-            .child(div().text_xs().text_color(muted).truncate().child(sub))
+            .child(
+                div()
+                    .max_w_full()
+                    .text_center()
+                    .text_sm()
+                    .text_color(fg)
+                    .truncate()
+                    .child(name),
+            )
+            .child(
+                div()
+                    .max_w_full()
+                    .text_center()
+                    .text_xs()
+                    .text_color(muted)
+                    .truncate()
+                    .child(sub),
+            )
             .child(edge_bar(
                 pos,
                 if active {
@@ -273,79 +343,62 @@ impl Console {
             .child(self.render_slot_action(entry, cx))
     }
 
-    /// The slot's corner action: 移出 on an active box (deactivate — the
-    /// daemon destroys its capture-side instance, so the edge stops
-    /// triggering), 放回 on a removed one (re-activate; the daemon
-    /// auto-displaces the other client on that side).
+    /// The slot's remove action, icon-only so it reads the same in any
+    /// locale (公子): moves the device off the canvas entirely — the
+    /// daemon records `Position::Unplaced`, the cell becomes a drop
+    /// target again, and the device waits in the list to be dragged
+    /// back onto any free slot.
     fn render_slot_action(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> impl IntoElement {
         let handle = entry.handle;
-        let pos = entry.config.pos;
-        let active = entry.state.active;
-        let (label, id) = if active {
-            ("移出", ("layout-remove", handle))
-        } else {
-            ("放回", ("layout-restore", handle))
-        };
 
         div().absolute().top_1().right_1().child(
-            Button::new(id)
-                .label(label)
+            Button::new(("layout-remove", handle))
+                .icon(Icon::new(IconName::X))
                 .ghost()
-                .small()
+                .tooltip("移出布局")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.set_slot_active(handle, pos, !active, window, cx);
+                    this.remove_from_layout(handle, window, cx);
                 })),
         )
     }
 
-    /// The slot button behind [`Self::render_slot_action`]: flip the
-    /// client's active state (公子拍板 D26①: removal IS deactivation).
-    fn set_slot_active(
+    /// Move a device off the canvas: `UpdatePosition(Unplaced)`. No
+    /// capture barrier is armed for an unplaced client, so this
+    /// supersedes the old deactivate-then-restore dance (D26① was a
+    /// workaround for the Position enum having no off-canvas value).
+    fn remove_from_layout(
         &mut self,
         handle: ClientHandle,
-        pos: Position,
-        active: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(entry) = self.entry(handle) else {
             return;
         };
-        if entry.state.active == active {
+        if entry.config.pos == Position::Unplaced {
             return;
         }
         let name = entry.name();
-        self.request(FrontendRequest::Activate(handle, active));
-        if active {
-            self.journal(
-                super::logbar::LogLevel::Info,
-                format!("布局放回：「{name}」启用（{}屏）", position_label(pos)),
-            );
-            window.push_notification(
-                Notification::success(format!("「{name}」已放回{}屏", position_label(pos))),
-                cx,
-            );
+        // Demo echo, same rationale as `place_device`.
+        if super::demo::enabled() {
+            if let Some(entry) = self.clients.iter_mut().find(|e| e.handle == handle) {
+                entry.config.pos = Position::Unplaced;
+            }
         } else {
-            self.journal(
-                super::logbar::LogLevel::Info,
-                format!(
-                    "布局移出：「{name}」停用，{}屏不再触发",
-                    position_label(pos)
-                ),
-            );
-            window.push_notification(
-                Notification::info(format!(
-                    "「{name}」已移出布局（{}屏停用）",
-                    position_label(pos)
-                )),
-                cx,
-            );
+            self.request(FrontendRequest::UpdatePosition(handle, Position::Unplaced));
         }
+        cx.notify();
+        self.journal(
+            super::logbar::LogLevel::Info,
+            format!("布局移出：「{name}」（未布置，可再拖入任意空格）"),
+        );
+        window.push_notification(Notification::info(format!("「{name}」已移出布局")), cx);
     }
 
     fn render_host_box(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let fg = cx.theme().secondary_foreground;
         v_flex()
+            .h_full()
             .flex_1()
             .items_center()
             .justify_center()
@@ -384,55 +437,50 @@ impl Console {
             return;
         }
         let name = entry.name();
-        // Dragging a removed (deactivated) device to a slot re-enlists
-        // it: placement IS layout membership (D26①).
-        let was_active = entry.state.active;
-        let occupants: Vec<SharedString> = self
+        let occupant = self
             .clients
             .iter()
-            .filter(|other| other.handle != handle && other.config.pos == pos)
-            .map(|other| other.name())
-            .collect();
-        match placement_rejection(pos, occupants.len()) {
-            Some(PlacementRejection::TopFull) => {
-                self.journal(
-                    super::logbar::LogLevel::Warn,
-                    format!("布局拒绝：上排已满（{name} → 上方）"),
-                );
-                window.push_notification(
-                    Notification::warning(format!("上排最多放置 {TOP_SLOTS} 块屏")),
-                    cx,
-                );
-            }
+            .find(|other| other.handle != handle && other.config.pos == pos)
+            .map(|other| other.name());
+        match placement_rejection(occupant.is_some() as usize) {
             Some(PlacementRejection::SlotOccupied) => {
+                let occupant = occupant.expect("guarded by is_some");
                 self.journal(
                     super::logbar::LogLevel::Warn,
                     format!(
-                        "布局拒绝：{}屏已有「{}」（{name}）",
+                        "布局拒绝：{}已有「{}」（{name}）",
                         position_label(pos),
-                        occupants[0]
+                        occupant
                     ),
                 );
                 window.push_notification(
                     Notification::warning(format!(
-                        "{}屏已有「{}」，先移出再放置",
+                        "{}已有「{}」，先移出再放置",
                         position_label(pos),
-                        occupants[0]
+                        occupant
                     )),
                     cx,
                 );
             }
             None => {
-                self.request(FrontendRequest::UpdatePosition(handle, pos));
-                if !was_active {
-                    self.request(FrontendRequest::Activate(handle, true));
+                // Demo mode has no daemon to echo `UpdatePosition` back
+                // as `State` events (the writer is `None`), so mutate
+                // the mirrored entry in place — otherwise the drop
+                // would never repaint (公子: 拖入没有更新效果，修复).
+                if super::demo::enabled() {
+                    if let Some(entry) = self.clients.iter_mut().find(|e| e.handle == handle) {
+                        entry.config.pos = pos;
+                    }
+                } else {
+                    self.request(FrontendRequest::UpdatePosition(handle, pos));
                 }
+                cx.notify();
                 self.journal(
                     super::logbar::LogLevel::Info,
-                    format!("布局：{name} → {}屏", position_label(pos)),
+                    format!("布局：{name} → {}", position_label(pos)),
                 );
                 window.push_notification(
-                    Notification::success(format!("「{name}」已放到{}屏", position_label(pos))),
+                    Notification::success(format!("「{name}」已放到{}", position_label(pos))),
                     cx,
                 );
             }
@@ -445,23 +493,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn top_row_holds_three_devices() {
-        assert_eq!(placement_rejection(Position::Top, 0), None);
-        assert_eq!(placement_rejection(Position::Top, 2), None);
-        assert_eq!(
-            placement_rejection(Position::Top, 3),
-            Some(PlacementRejection::TopFull)
-        );
-    }
-
-    #[test]
-    fn single_sides_hold_one_device() {
-        for pos in [Position::Left, Position::Right, Position::Bottom] {
-            assert_eq!(placement_rejection(pos, 0), None);
+    fn every_slot_holds_one_device() {
+        for _pos in CANVAS_SLOTS {
+            assert_eq!(placement_rejection(0), None);
             assert_eq!(
-                placement_rejection(pos, 1),
+                placement_rejection(1),
                 Some(PlacementRejection::SlotOccupied)
             );
         }
+    }
+
+    #[test]
+    fn canvas_has_three_rows_around_the_host() {
+        assert_eq!(CANVAS_SLOTS.len(), 8);
+        assert!(CANVAS_SLOTS.contains(&Position::BottomLeft));
+        assert!(CANVAS_SLOTS.contains(&Position::BottomRight));
     }
 }

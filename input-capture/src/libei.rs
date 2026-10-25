@@ -47,7 +47,7 @@ use input_event::{
 use crate::{CaptureEvent, normalize_cursor_in_layout};
 
 use super::{
-    Capture as MousehopInputCapture, Position,
+    Capture as MousehopInputCapture, Position, client_segments,
     error::{CaptureError, LibeiCaptureCreationError},
 };
 
@@ -118,15 +118,6 @@ fn portal_cursor_position(cursor: Option<(f32, f32)>) -> Option<(i32, i32)> {
     cursor.and_then(|(x, y)| {
         (x.is_finite() && y.is_finite()).then(|| (x.round() as i32, y.round() as i32))
     })
-}
-
-fn display_edge(pos: Position) -> DisplayEdge {
-    match pos {
-        Position::Left => DisplayEdge::Left,
-        Position::Right => DisplayEdge::Right,
-        Position::Top => DisplayEdge::Top,
-        Position::Bottom => DisplayEdge::Bottom,
-    }
 }
 
 /// Convert a contained contour segment to the inclusive endpoint convention
@@ -210,8 +201,7 @@ fn select_barriers(
     let mut barriers: Vec<ICBarrier> = vec![];
 
     for pos in clients {
-        let mut client_barriers = layout
-            .exposed_segments(display_edge(*pos))
+        let mut client_barriers = client_segments(layout, *pos, clients)
             .into_iter()
             // A barrier must contain more than one point. Transient 1x1
             // wl_output fallbacks occur while Hyprland is enumerating a
@@ -850,10 +840,16 @@ async fn release_capture(
         log::debug!("client entered @ ({x}, {y})");
         let (dx, dy) = match current_pos {
             // Offset the cursor so it does not immediately enter again.
+            // Corners push diagonally into the screen from the corner.
             Position::Left => (1., 0.),
             Position::Right => (-1., 0.),
             Position::Top => (0., 1.),
             Position::Bottom => (0., -1.),
+            Position::TopLeft => (1., 1.),
+            Position::TopRight => (-1., 1.),
+            Position::BottomLeft => (1., -1.),
+            Position::BottomRight => (-1., -1.),
+            Position::Unplaced => (0., 0.),
         };
         (x as f64 + dx, y as f64 + dy)
     });

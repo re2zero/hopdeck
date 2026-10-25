@@ -5210,6 +5210,7 @@ dependencies = [
  "log",
  "mousehop-ipc",
  "time",
+ "x11rb",
 ]
 
 [[package]]

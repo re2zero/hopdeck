@@ -15,7 +15,7 @@ use tokio::time::Sleep;
 
 use input_event::{
     CrossingModifier, Event, KeyboardEvent, PointerEvent,
-    display::{DisplayEdge, DisplayLayout},
+    display::{DisplayEdge, DisplayLayout, EdgeSegment},
     scancode,
 };
 
@@ -101,12 +101,137 @@ impl Display for CaptureEvent {
     }
 }
 
+/// The edges a client's hot zone lives on: one for edge positions, the
+/// two adjacent edges for corners, none for `Unplaced`.
+pub(crate) fn display_edges(pos: Position) -> &'static [DisplayEdge] {
+    match pos {
+        Position::Left => &[DisplayEdge::Left],
+        Position::Right => &[DisplayEdge::Right],
+        Position::Top => &[DisplayEdge::Top],
+        Position::Bottom => &[DisplayEdge::Bottom],
+        Position::TopLeft => &[DisplayEdge::Top, DisplayEdge::Left],
+        Position::TopRight => &[DisplayEdge::Top, DisplayEdge::Right],
+        Position::BottomLeft => &[DisplayEdge::Bottom, DisplayEdge::Left],
+        Position::BottomRight => &[DisplayEdge::Bottom, DisplayEdge::Right],
+        Position::Unplaced => &[],
+    }
+}
+
+/// Whether `pos` occupies the low-coordinate (start) side of `edge`.
+/// TopLeft owns the left part of the top edge and the top part of the
+/// left edge, and so on for the other corners.
+fn owns_low_half(pos: Position, edge: DisplayEdge) -> bool {
+    matches!(
+        (pos, edge),
+        (Position::TopLeft, DisplayEdge::Top)
+            | (Position::TopLeft, DisplayEdge::Left)
+            | (Position::BottomLeft, DisplayEdge::Left)
+            | (Position::BottomLeft, DisplayEdge::Bottom)
+            | (Position::TopRight, DisplayEdge::Top)
+            | (Position::TopRight, DisplayEdge::Right)
+            | (Position::BottomRight, DisplayEdge::Right)
+            | (Position::BottomRight, DisplayEdge::Bottom)
+    )
+}
+
+/// Cut the corner-side half off a segment. `low` selects which end the
+/// corner owns; segments shorter than two points are left to the corner
+/// whole (the `len() > 1` filter below still drops 1px leftovers).
+fn take_half(segment: EdgeSegment, low: bool) -> EdgeSegment {
+    let mid = segment.start + (segment.end - segment.start) / 2;
+    if low {
+        EdgeSegment {
+            end: mid,
+            ..segment
+        }
+    } else {
+        EdgeSegment {
+            start: mid,
+            ..segment
+        }
+    }
+}
+
+/// The hot-zone segments for one client. Corner clients own the
+/// corner-side half of each adjacent edge so that an edge client on the
+/// same side never overlaps them: the edge client's segments are
+/// trimmed to the remaining part of every segment a placed corner
+/// already claims. Unplaced clients get nothing.
+pub(crate) fn client_segments(
+    layout: &DisplayLayout,
+    pos: Position,
+    clients: &[Position],
+) -> Vec<EdgeSegment> {
+    if !pos.is_placed() {
+        return vec![];
+    }
+    let mut segments = vec![];
+    for &edge in display_edges(pos) {
+        for segment in layout.exposed_segments(edge) {
+            if segment.len() <= 1 {
+                continue;
+            }
+            match pos {
+                // Corners take the corner-side half of every segment.
+                Position::TopLeft
+                | Position::TopRight
+                | Position::BottomLeft
+                | Position::BottomRight => {
+                    segments.push(take_half(segment, owns_low_half(pos, edge)));
+                }
+                // Edge positions keep the whole segment minus the halves
+                // already claimed by placed corners on the same edge.
+                _ => {
+                    let mut segment = segment;
+                    for &other in clients {
+                        if !matches!(
+                            other,
+                            Position::TopLeft
+                                | Position::TopRight
+                                | Position::BottomLeft
+                                | Position::BottomRight
+                        ) || !display_edges(other).contains(&edge)
+                        {
+                            continue;
+                        }
+                        let low = owns_low_half(other, edge);
+                        let mid = segment.start + (segment.end - segment.start) / 2;
+                        segment = if low {
+                            EdgeSegment {
+                                start: mid,
+                                ..segment
+                            }
+                        } else {
+                            EdgeSegment {
+                                end: mid,
+                                ..segment
+                            }
+                        };
+                    }
+                    if segment.len() > 1 {
+                        segments.push(segment);
+                    }
+                }
+            }
+        }
+    }
+    segments
+}
+
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
 pub enum Position {
     Left,
     Right,
     Top,
     Bottom,
+    /// Corners trigger from the two adjacent edges near that corner
+    /// (libei barriers / layer-shell hot windows per edge).
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    /// Not on the layout canvas: no barrier is armed.
+    Unplaced,
 }
 
 impl Position {
@@ -116,7 +241,17 @@ impl Position {
             Position::Right => Self::Left,
             Position::Top => Self::Bottom,
             Position::Bottom => Self::Top,
+            Position::TopLeft => Self::TopRight,
+            Position::TopRight => Self::TopLeft,
+            Position::BottomLeft => Self::BottomRight,
+            Position::BottomRight => Self::BottomLeft,
+            Position::Unplaced => Self::Unplaced,
         }
+    }
+
+    /// Whether this position arms capture at all.
+    pub fn is_placed(self) -> bool {
+        self != Position::Unplaced
     }
 }
 
@@ -127,6 +262,11 @@ impl Display for Position {
             Position::Right => "right",
             Position::Top => "top",
             Position::Bottom => "bottom",
+            Position::TopLeft => "top-left",
+            Position::TopRight => "top-right",
+            Position::BottomLeft => "bottom-left",
+            Position::BottomRight => "bottom-right",
+            Position::Unplaced => "unplaced",
         };
         write!(f, "{pos}")
     }
@@ -293,10 +433,16 @@ fn entry_axis_delta(position: Position, dx: f64, dy: f64) -> f64 {
     match position {
         // Position::Left = guest is to the LEFT of host. User entered
         // by moving left (-dx). Convention: positive = into guest.
+        // Corners deepen along their diagonal.
         Position::Left => -dx,
         Position::Right => dx,
         Position::Top => -dy,
         Position::Bottom => dy,
+        Position::TopLeft => (-dx - dy) / 2.0,
+        Position::TopRight => (dx - dy) / 2.0,
+        Position::BottomLeft => (-dx + dy) / 2.0,
+        Position::BottomRight => (dx + dy) / 2.0,
+        Position::Unplaced => 0.0,
     }
 }
 
@@ -336,6 +482,11 @@ fn display_edge(position: Position) -> DisplayEdge {
         Position::Right => DisplayEdge::Right,
         Position::Top => DisplayEdge::Top,
         Position::Bottom => DisplayEdge::Bottom,
+        // Layout projection for corners folds onto the vertical edge;
+        // the exact corner point comes from the warp-target matches.
+        Position::TopLeft | Position::BottomLeft => DisplayEdge::Left,
+        Position::TopRight | Position::BottomRight => DisplayEdge::Right,
+        Position::Unplaced => DisplayEdge::Left,
     }
 }
 
@@ -347,6 +498,13 @@ fn peer_entry_edge(position: Position) -> DisplayEdge {
         Position::Right => DisplayEdge::Left,
         Position::Top => DisplayEdge::Bottom,
         Position::Bottom => DisplayEdge::Top,
+        // Diagonal mirror: a guest at our top-left is entered through
+        // its bottom-right corner region.
+        Position::TopLeft => DisplayEdge::Right,
+        Position::TopRight => DisplayEdge::Left,
+        Position::BottomLeft => DisplayEdge::Right,
+        Position::BottomRight => DisplayEdge::Left,
+        Position::Unplaced => DisplayEdge::Left,
     }
 }
 
@@ -781,6 +939,12 @@ impl InputCapture {
             Position::Top => ((nx * peer_w as f64) as i32, peer_h_i.saturating_sub(1)),
             // Peer below → cursor enters peer on top
             Position::Bottom => ((nx * peer_w as f64) as i32, 0),
+            // Corners enter through the mirrored peer corner.
+            Position::TopLeft => (peer_w_i.saturating_sub(1), peer_h_i.saturating_sub(1)),
+            Position::TopRight => (0, peer_h_i.saturating_sub(1)),
+            Position::BottomLeft => (peer_w_i.saturating_sub(1), 0),
+            Position::BottomRight => (0, 0),
+            Position::Unplaced => (0, 0),
         };
         Some(target)
     }
@@ -795,6 +959,12 @@ impl InputCapture {
         match pos {
             Position::Left | Position::Right => f64::from(w),
             Position::Top | Position::Bottom => f64::from(h),
+            // Corners traverse the diagonal; the longer side bounds it.
+            Position::TopLeft
+            | Position::TopRight
+            | Position::BottomLeft
+            | Position::BottomRight => f64::from(w.max(h)),
+            Position::Unplaced => 0.0,
         }
     }
 
@@ -846,11 +1016,17 @@ impl InputCapture {
         let ph = peer_h as f64;
         Some(match pos {
             // `pos` locates the peer relative to this host, so the peer is
-            // entered through the opposite edge.
+            // entered through the opposite edge (opposite corner for the
+            // corner positions).
             Position::Left => ((pw - 1.0).max(0.0), ph / 2.0),
             Position::Right => (0.0, ph / 2.0),
             Position::Top => (pw / 2.0, (ph - 1.0).max(0.0)),
             Position::Bottom => (pw / 2.0, 0.0),
+            Position::TopLeft => ((pw - 1.0).max(0.0), (ph - 1.0).max(0.0)),
+            Position::TopRight => (0.0, (ph - 1.0).max(0.0)),
+            Position::BottomLeft => ((pw - 1.0).max(0.0), 0.0),
+            Position::BottomRight => (0.0, 0.0),
+            Position::Unplaced => (0.0, 0.0),
         })
     }
 
@@ -896,6 +1072,15 @@ impl InputCapture {
                 origin_x + (nx * host_w as f64) as i32,
                 origin_y + host_h_i.saturating_sub(1),
             ),
+            // Corners return through the mirrored host corner.
+            Position::TopLeft => (origin_x, origin_y),
+            Position::TopRight => (origin_x + host_w_i.saturating_sub(1), origin_y),
+            Position::BottomLeft => (origin_x, origin_y + host_h_i.saturating_sub(1)),
+            Position::BottomRight => (
+                origin_x + host_w_i.saturating_sub(1),
+                origin_y + host_h_i.saturating_sub(1),
+            ),
+            Position::Unplaced => (origin_x, origin_y),
         };
         layout.project_point(display_edge(pos), rectangular_target)
     }

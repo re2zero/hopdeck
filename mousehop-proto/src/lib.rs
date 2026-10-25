@@ -180,6 +180,16 @@ pub enum Position {
     Right,
     Top,
     Bottom,
+    /// Wire values 4+ extend the LAN-mouse four-edge model with the
+    /// four corners and the "not on the canvas" state (console layout
+    /// v3). Peers on older builds reject these as unknown discriminants,
+    /// so both ends must run the same release (same caveat as
+    /// `[video] parity`).
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Unplaced,
 }
 
 /// Confirmed input availability of the capturing host. This is sent only for
@@ -208,6 +218,11 @@ impl Display for Position {
             Position::Right => "right",
             Position::Top => "top",
             Position::Bottom => "bottom",
+            Position::TopLeft => "top-left",
+            Position::TopRight => "top-right",
+            Position::BottomLeft => "bottom-left",
+            Position::BottomRight => "bottom-right",
+            Position::Unplaced => "unplaced",
         };
         write!(f, "{pos}")
     }

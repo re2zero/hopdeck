@@ -76,7 +76,7 @@ use input_event::{
 use crate::{CaptureError, CaptureEvent, normalize_cursor_in_layout};
 
 use super::{
-    Capture, Position,
+    Capture, Position, client_segments,
     error::{LayerShellCaptureCreationError, WaylandBindError},
 };
 
@@ -197,8 +197,11 @@ impl Window {
         log::debug!("creating window output: {output:?}, segment: {segment:?}");
         let g = &state.globals;
 
-        let (width, height, surface_origin, anchor, top_margin, left_margin) = match pos {
-            Position::Left => (
+        // Geometry follows the segment's edge, not the client position:
+        // a corner client spans one horizontal and one vertical hot
+        // window, both tagged with the corner Position.
+        let (width, height, surface_origin, anchor, top_margin, left_margin) = match segment.edge {
+            DisplayEdge::Left => (
                 1,
                 segment.len(),
                 (segment.coordinate, segment.start),
@@ -206,7 +209,7 @@ impl Window {
                 segment.start - output_pos.1,
                 0,
             ),
-            Position::Right => (
+            DisplayEdge::Right => (
                 1,
                 segment.len(),
                 (segment.coordinate, segment.start),
@@ -214,7 +217,7 @@ impl Window {
                 segment.start - output_pos.1,
                 0,
             ),
-            Position::Top => (
+            DisplayEdge::Top => (
                 segment.len(),
                 1,
                 (segment.start, segment.coordinate),
@@ -222,7 +225,7 @@ impl Window {
                 0,
                 segment.start - output_pos.0,
             ),
-            Position::Bottom => (
+            DisplayEdge::Bottom => (
                 segment.len(),
                 1,
                 (segment.start, segment.coordinate),
@@ -325,15 +328,6 @@ fn absolute_warp_target(layout: &DisplayLayout, screen: (i32, i32)) -> Option<Ab
     })
 }
 
-fn display_edge(pos: Position) -> DisplayEdge {
-    match pos {
-        Position::Left => DisplayEdge::Left,
-        Position::Right => DisplayEdge::Right,
-        Position::Top => DisplayEdge::Top,
-        Position::Bottom => DisplayEdge::Bottom,
-    }
-}
-
 fn output_layout(outputs: &[Output]) -> DisplayLayout {
     // Feed one tuple per wl_output, including an invalid placeholder while
     // xdg-output information is pending. DisplayLayout retains tuple indices,
@@ -359,10 +353,13 @@ fn lost_active_seat_device(
     (had_pointer && !has_pointer) || (had_keyboard && !has_keyboard)
 }
 
-fn get_output_configuration(state: &State, pos: Position) -> Vec<(Output, EdgeSegment)> {
+fn get_output_configuration(
+    state: &State,
+    pos: Position,
+    active_positions: &[Position],
+) -> Vec<(Output, EdgeSegment)> {
     let layout = output_layout(&state.outputs);
-    layout
-        .exposed_segments(display_edge(pos))
+    client_segments(&layout, pos, active_positions)
         .into_iter()
         .filter_map(|segment| {
             state
@@ -758,7 +755,8 @@ impl State {
 
     fn add_client(&mut self, pos: Position) {
         self.active_positions.insert(pos);
-        let outputs = get_output_configuration(self, pos);
+        let active_positions = self.active_positions.iter().copied().collect::<Vec<_>>();
+        let outputs = get_output_configuration(self, pos, &active_positions);
 
         log::info!(
             "adding capture for position {pos} - using output segments: {:?}",

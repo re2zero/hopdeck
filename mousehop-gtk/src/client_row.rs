@@ -107,6 +107,14 @@ impl ClientRow {
                 "right" => Some(1u32),
                 "top" => Some(2u32),
                 "bottom" => Some(3u32),
+                // Corners and unplaced append after the four edges; the
+                // index order matches the client_row.ui items and the
+                // request-position-change mapping in window.rs.
+                "top-left" => Some(4u32),
+                "top-right" => Some(5u32),
+                "bottom-left" => Some(6u32),
+                "bottom-right" => Some(7u32),
+                "unplaced" => Some(8u32),
                 _ => Some(0u32),
             })
             .sync_create()

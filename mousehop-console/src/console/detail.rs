@@ -3,8 +3,8 @@
 
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    AppContext, ClickEvent, Context, Div, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
+    AnyElement, AppContext, ClickEvent, Context, Div, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window,
     assets::IconName,
     component::{
         ActiveTheme, Disableable, Icon, Sizable, WindowExt,
@@ -15,9 +15,11 @@ use gpui_kit::{
         switch::Switch,
         v_flex,
     },
-    div, img,
+    div, img, px,
 };
-use mousehop_ipc::{ClientHandle, ConnectMode, CrossingModifier, FrontendRequest, Position};
+use mousehop_ipc::{
+    ClientHandle, ConnectMode, CrossingModifier, FrontendRequest, IncomingPeerConfig, Position,
+};
 use std::net::IpAddr;
 
 use super::{Console, DeviceEntry, EditDraft, position_label};
@@ -29,6 +31,8 @@ impl Console {
             .test_support()
             .flex_1()
             .min_h_0()
+            .flex_col()
+            .items_stretch()
             .overflow_y_scroll()
             .child(match self.selected_entry() {
                 Some(entry) if self.editing(entry.handle) => {
@@ -45,13 +49,21 @@ impl Console {
 
     fn render_detail_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let muted = cx.theme().muted_foreground;
-        h_flex()
+        v_flex()
             .size_full()
             .items_center()
             .justify_center()
-            .text_sm()
+            .gap_2()
             .text_color(muted)
-            .child("选择左侧设备查看详情")
+            .child(Icon::new(IconName::MousePointer2).large().text_color(muted))
+            .child(div().text_sm().child("选择左侧设备查看详情"))
+            .child(
+                div()
+                    .max_w(px(300.))
+                    .text_center()
+                    .text_xs()
+                    .child("对方不在这个网络？在搜索框输入对方 IP 回车即可直接发起连接。"),
+            )
     }
 
     fn render_device_detail(
@@ -59,7 +71,6 @@ impl Console {
         entry: &DeviceEntry,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let online = entry.online();
         let muted = cx.theme().muted_foreground;
         let name = entry.name();
         let addr = entry.addr_label();
@@ -73,92 +84,217 @@ impl Console {
                     .gap_3()
                     .child(self.render_device_icon(cx))
                     .child(
-                        v_flex()
-                            .min_w_0()
-                            .child(
-                                div().text_lg().child(format!(
-                                    "{name}{}",
-                                    if online { "" } else { " · 离线" }
-                                )),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(muted)
-                                    .truncate()
-                                    .child(format!("{addr} · {}", entry.position_label())),
-                            ),
+                        v_flex().min_w_0().child(div().text_lg().child(name)).child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .truncate()
+                                .child(format!("{addr} · {}", entry.connect_mode_label())),
+                        ),
                     )
                     .child(
                         h_flex()
                             .ml_auto()
-                            .gap_1()
+                            .gap_1p5()
                             .child({
                                 let (label, tone) = self.status_chip(entry, cx);
                                 super::chip(label, tone.opacity(0.15), tone)
                             })
-                            .when(entry.config.connect_mode == ConnectMode::Reverse, |row| {
-                                row.child(super::chip(
-                                    entry.connect_mode_label(),
-                                    cx.theme().secondary,
-                                    cx.theme().secondary_foreground,
-                                ))
-                            }),
+                            .child(super::chip(
+                                entry.connect_mode_label(),
+                                cx.theme().secondary,
+                                cx.theme().secondary_foreground,
+                            ))
+                            .child(self.render_cloud_badge(cx)),
                     ),
             )
             .child(self.render_kv_section("概览", cx))
-            .child(self.render_kv("屏幕位置", entry.position_label().into(), muted))
-            .child(self.render_kv("连接方式", entry.connect_mode_label().into(), muted))
-            .child(self.render_kv("端口", entry.config.port.to_string().into(), muted))
-            .child(self.render_kv("对端版本", peer_version(&entry.state), muted))
-            .child(self.render_kv("往返延迟", latency_label(&entry.state), muted))
+            .child(self.render_overview_grid(entry, cx))
+            .child(self.render_kv_section("安全", cx))
+            .child(self.render_trust_section(entry, cx))
             .child(self.render_share_section(entry, cx))
             .child(self.render_video_section(entry, cx))
-            .child(self.render_trust_section(entry, cx))
             .child(self.render_device_actions(entry, cx))
     }
 
-    /// Send-side sharing for this device (design v2.2's detail 共享选项
-    /// row): the per-client `clipboard_send` gate. Clipboard text only
-    /// flows when this AND the peer's receive gate (settings overlay)
-    /// are on. The daemon echoes the change through the usual `State`
-    /// event, so the switch state is the config mirror.
-    fn render_share_section(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+    /// The cloud remote-view reservation (design v2.2's dashed 云
+    /// badge): purely a placeholder until the cloud milestone lands.
+    fn render_cloud_badge(&self, cx: &mut Context<Self>) -> Div {
+        div()
+            .h_5()
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_full()
+            .border_1()
+            .border_dashed()
+            .border_color(cx.theme().border)
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(Icon::new(IconName::Cloud).xsmall())
+            .child("云")
+    }
+
+    /// Overview strip (design v2.2's `.mh-kv`): a bordered card cut
+    /// into four labeled cells by 1px dividers.
+    fn render_overview_grid(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
+        let cells = [
+            ("共享位置", entry.position_label().into()),
+            ("往返延迟", latency_label(&entry.state)),
+            ("对端版本", peer_version(&entry.state)),
+            ("来源", SharedString::from("局域网")),
+        ];
+        div()
+            .mt_1()
+            .flex()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .overflow_hidden()
+            .children(
+                cells
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (label, value))| {
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .px_3()
+                            .py_2()
+                            .when(index > 0, |cell| {
+                                cell.border_l_1().border_color(cx.theme().border)
+                            })
+                            .child(div().text_xs().text_color(muted).child(label))
+                            .child(div().text_sm().truncate().child(value))
+                    }),
+            )
+    }
+
+    /// Design v2.2's 共享选项 card trio. The daemon's semantics (D22①)
+    /// split the gates by direction: the send-side clipboard gate is
+    /// per-client, while natural scroll and sensitivity apply to what
+    /// this machine *receives* from the peer (keyed on its certificate
+    /// fingerprint). Shown for a trusted online device, as in the mock.
+    fn render_share_section(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+        let trusted = self
+            .entry_trust(entry)
+            .map(|(fp, peer)| (fp.to_string(), peer.clone()));
+        let shareable = entry.online() && trusted.is_some();
         let handle = entry.handle;
         let name = entry.name();
-        let writer = self.writer.clone();
-        let entity = cx.entity();
 
-        div().child(
-            v_flex()
-                .mt_1()
-                .child(self.render_kv_section("共享选项", cx))
-                .child(super::settings::option_row(
-                    "剪贴板发送",
-                    "本机剪贴板变更同步给该设备（对方也需开启接收）",
-                    Switch::new(SharedString::from(format!("clip-send-{handle}")))
-                        .checked(entry.config.clipboard_send)
-                        .on_click(move |checked, _, cx| {
-                            if let Some(writer) = &writer {
-                                writer.send(FrontendRequest::SetClientClipboardSend(
-                                    handle, *checked,
-                                ));
-                            }
-                            entity.update(cx, |this, _cx| {
-                                this.journal(
-                                    super::logbar::LogLevel::Info,
-                                    format!(
-                                        "剪贴板发送「{name}」→ {}",
-                                        if *checked { "开" } else { "关" }
-                                    ),
-                                );
-                            });
-                        })
-                        .small(),
-                    muted,
-                )),
-        )
+        div().when(shareable, |this| {
+            let Some((fingerprint, peer)) = trusted else {
+                return this;
+            };
+            let writer = self.writer.clone();
+            let entity = cx.entity();
+
+            let clip_switch = Switch::new(SharedString::from(format!("clip-send-{handle}")))
+                .checked(entry.config.clipboard_send)
+                .on_click(move |checked, _, cx| {
+                    if let Some(writer) = &writer {
+                        writer.send(FrontendRequest::SetClientClipboardSend(handle, *checked));
+                    }
+                    entity.update(cx, |this, _| {
+                        this.journal(
+                            super::logbar::LogLevel::Info,
+                            format!(
+                                "剪贴板发送「{name}」→ {}",
+                                if *checked { "开" } else { "关" }
+                            ),
+                        );
+                    });
+                })
+                .small();
+
+            let natural_switch = {
+                let writer = self.writer.clone();
+                let fp = fingerprint.clone();
+                Switch::new(SharedString::from(format!("detail-natural-{handle}")))
+                    .checked(peer.natural_scroll)
+                    .on_click(move |checked, _, _| {
+                        if let Some(writer) = &writer {
+                            writer.send(FrontendRequest::SetIncomingPeerNaturalScroll(
+                                fp.clone(),
+                                *checked,
+                            ));
+                        }
+                    })
+                    .small()
+            };
+
+            this.child(
+                v_flex()
+                    .mt_1()
+                    .child(self.render_kv_section("共享选项", cx))
+                    .child(
+                        h_flex()
+                            .mt_1()
+                            .gap_2()
+                            .child(self.render_option_card(
+                                IconName::Clipboard,
+                                "剪贴板共享",
+                                "本机剪贴板同步给该设备（对方也需开启接收）",
+                                clip_switch.into_any_element(),
+                                cx,
+                            ))
+                            .child(self.render_option_card(
+                                IconName::Mouse,
+                                "自然滚动",
+                                "该设备发来的滚轮方向反转",
+                                natural_switch.into_any_element(),
+                                cx,
+                            ))
+                            .child(
+                                self.render_option_card(
+                                    IconName::Gauge,
+                                    "指针灵敏度",
+                                    "该设备指针移动速度倍率",
+                                    self.render_sensitivity_stepper(&fingerprint, &peer, cx)
+                                        .into_any_element(),
+                                    cx,
+                                ),
+                            ),
+                    ),
+            )
+        })
+    }
+
+    /// One 共享选项 card (design's `.mh-optcard`): icon + title, a
+    /// hint line, then the control row pinned to the bottom.
+    fn render_option_card(
+        &self,
+        icon: IconName,
+        title: &str,
+        hint: &str,
+        control: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let title = title.to_string();
+        let hint = hint.to_string();
+        v_flex()
+            .flex_1()
+            .min_w(px(148.))
+            .gap_1()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_1p5()
+                    .text_sm()
+                    .child(Icon::new(icon).small().text_color(muted))
+                    .child(title),
+            )
+            .child(div().text_xs().text_color(muted).child(hint))
+            .child(h_flex().mt_1().items_center().justify_end().child(control))
     }
 
     /// Screen-view section (M3a increment ④): the picture toggle for the
@@ -268,53 +404,220 @@ impl Console {
             .child(div().text_xs().text_color(muted).child(stats))
     }
 
-    /// Inline trust state (design D15): once the peer's fingerprint is
-    /// known (first inbound session) and authorized, show the record
-    /// with a guarded revoke. Devices without a fingerprint yet simply
-    /// render nothing here.
+    /// The peer's authorized record, when its fingerprint is known and
+    /// trusted. Backs the share cards and the trust row.
+    fn entry_trust<'a>(
+        &'a self,
+        entry: &'a DeviceEntry,
+    ) -> Option<(&'a str, &'a IncomingPeerConfig)> {
+        entry
+            .state
+            .peer_fingerprint
+            .as_deref()
+            .and_then(|fp| self.authorized.get(fp).map(|peer| (fp, peer)))
+    }
+
+    /// Design v2.2's 安全 section: while the device waits at the local
+    /// authorization gate it gets the inline auth card (accept/decline
+    /// with the fingerprint to compare); otherwise the trust row card
+    /// (trusted + guarded revoke, or the not-yet-trusted hint).
     fn render_trust_section(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
-        div().when_some(
-            entry
-                .state
-                .peer_fingerprint
-                .as_deref()
-                .and_then(|fp| self.authorized.get(fp).map(|peer| (fp, peer))),
-            |this, (fp, peer)| {
-                let fp = fp.to_string();
-                this.child(
-                    v_flex()
-                        .mt_1()
-                        .gap_1()
-                        .child(self.render_kv_section("信任", cx))
-                        .child(self.render_kv("状态", "已信任".into(), cx.theme().muted_foreground))
-                        .child(self.render_kv(
-                            "备注",
-                            peer.description.clone().into(),
-                            cx.theme().muted_foreground,
-                        ))
-                        .child(self.render_kv(
-                            "最近地址",
-                            peer.last_addr.clone().unwrap_or_else(|| "—".into()).into(),
-                            cx.theme().muted_foreground,
-                        ))
-                        .child(self.render_kv(
-                            "指纹",
-                            super::short_fingerprint(&fp).to_string().into(),
-                            cx.theme().muted_foreground,
-                        ))
-                        .child(
-                            Button::new("revoke-trust")
-                                .label("撤销信任")
-                                .ghost()
-                                .danger()
-                                .small()
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    this.confirm_revoke(fp.clone(), window, cx);
-                                })),
-                        ),
+        div().child(match self.pending_entry_fingerprint(entry) {
+            Some(fingerprint) => self
+                .render_pending_auth_card(entry, fingerprint, cx)
+                .into_any_element(),
+            None => self.render_trust_row(entry, cx).into_any_element(),
+        })
+    }
+
+    /// The fingerprint waiting at the gate for THIS device, if any.
+    fn pending_entry_fingerprint(&self, entry: &DeviceEntry) -> Option<String> {
+        entry
+            .state
+            .peer_fingerprint
+            .as_deref()
+            .filter(|fp| self.awaiting_auth.contains_key(*fp))
+            .map(str::to_string)
+    }
+
+    fn render_pending_auth_card(
+        &self,
+        entry: &DeviceEntry,
+        fingerprint: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let mono = cx.theme().mono_font_family.clone();
+        let name = entry.name();
+        let handle = entry.handle;
+        let writer = self.writer.clone();
+        let entity = cx.entity();
+        let decline_fp = fingerprint.clone();
+        let decline_name = name.clone();
+        let accept_name = name.clone();
+
+        v_flex()
+            .mt_1()
+            .gap_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().warning.opacity(0.5))
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .bg(cx.theme().warning.opacity(0.12))
+                    .text_color(cx.theme().warning)
+                    .child(Icon::new(IconName::ShieldAlert).small())
+                    .child(div().text_sm().child(format!("{name} 请求连接到本机"))),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("首次连接需要确认一次，确认后自动信任，不再重复询问。请核对对方屏幕上显示的指纹与本机一致："),
+                    )
+                    .child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(cx.theme().secondary)
+                            .text_xs()
+                            .font_family(mono)
+                            .child(fingerprint.clone()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(SharedString::from(format!("auth-accept-{handle}")))
+                                    .icon(Icon::new(IconName::ShieldCheck))
+                                    .label("接受并信任")
+                                    .primary()
+                                    .small()
+                                    .on_click(move |_, _, _| {
+                                        if let Some(writer) = &writer {
+                                            writer.send(FrontendRequest::AuthorizeKey(
+                                                accept_name.to_string(),
+                                                fingerprint.clone(),
+                                            ));
+                                        }
+                                    }),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("auth-decline-{handle}")))
+                                    .label("拒绝")
+                                    .ghost()
+                                    .danger()
+                                    .small()
+                                    .on_click(cx.listener(
+                                        move |this, _: &ClickEvent, _, cx| {
+                                            this.awaiting_auth.remove(&decline_fp);
+                                            entity.update(cx, |this, _| {
+                                                this.journal(
+                                                    super::logbar::LogLevel::Info,
+                                                    format!("已拒绝「{decline_name}」的连接请求"),
+                                                );
+                                            });
+                                        },
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("若你启用了访问密码（config.toml 的 access_password），对方在自己那端输入密码即可直接通过，无需逐台确认。"),
+                    ),
+            )
+    }
+
+    fn render_trust_row(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let trusted = self.entry_trust(entry);
+        let handle = entry.handle;
+
+        h_flex()
+            .mt_1()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(
+                div().child(
+                    Icon::new(if trusted.is_some() {
+                        IconName::ShieldCheck
+                    } else {
+                        IconName::ShieldAlert
+                    })
+                    .small()
+                    .text_color(if trusted.is_some() {
+                        cx.theme().success
+                    } else {
+                        cx.theme().warning
+                    }),
+                ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().child(if trusted.is_some() {
+                        "已信任"
+                    } else {
+                        "未信任"
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .truncate()
+                            .child(match trusted {
+                                Some((fp, peer)) => match &peer.description {
+                                    desc if desc.is_empty() => SharedString::from(format!(
+                                        "首次连接时已核对指纹 · {}",
+                                        super::short_fingerprint(fp)
+                                    )),
+                                    desc => SharedString::from(format!(
+                                        "首次连接时已核对指纹 · {} · 备注 {desc}",
+                                        super::short_fingerprint(fp)
+                                    )),
+                                },
+                                None => "下次连接时需要确认或输入访问密码".into(),
+                            }),
+                    ),
+            )
+            .when(trusted.is_some(), |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("revoke-trust-{handle}")))
+                        .label("撤销信任")
+                        .ghost()
+                        .danger()
+                        .small()
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            let Some(fp) = this.entry_trust_by_handle(handle) else {
+                                return;
+                            };
+                            this.confirm_revoke(fp, window, cx);
+                        })),
                 )
-            },
-        )
+            })
+    }
+
+    fn entry_trust_by_handle(&self, handle: ClientHandle) -> Option<String> {
+        self.entry(handle)
+            .and_then(|entry| self.entry_trust(entry).map(|(fp, _)| fp.to_string()))
     }
 
     fn render_device_icon(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -402,11 +705,12 @@ impl Console {
         );
         row.child(
             Button::new("remote-view")
-                .icon(Icon::new(IconName::Eye))
+                .icon(Icon::new(IconName::Cloud))
                 .label("远程查看")
                 .outline()
                 .small()
-                .disabled(!self.video.state.available),
+                .disabled(true)
+                .tooltip("云端远程控制即将推出：经云中继查看对端画面。局域网画面查看见上方「画面」开关。"),
         )
     }
 
@@ -434,7 +738,7 @@ impl Console {
 
         v_flex()
             .p_4()
-            .gap_3()
+            .gap_2()
             .child(
                 h_flex()
                     .items_center()
@@ -457,11 +761,36 @@ impl Console {
                     ),
             )
             .child(self.render_kv_section("基本", cx))
-            .child(self.render_edit_field("设备名称", Input::new(&edit.hostname).small(), cx))
-            .child(self.render_edit_field("地址", Input::new(&edit.ips).small(), cx))
-            .child(self.render_edit_field("端口", Input::new(&edit.port).small(), cx))
-            .child(self.render_position_chips(edit, cx))
-            .child(self.render_connect_mode_chips(edit, cx))
+            .child(self.render_edit_card(
+                "设备名称",
+                "留空则自动命名",
+                Input::new(&edit.hostname).small().w(px(320.)),
+                cx,
+            ))
+            .child(self.render_edit_card(
+                "地址",
+                "IP 地址，多个用逗号分隔",
+                Input::new(&edit.ips).small().w(px(320.)),
+                cx,
+            ))
+            .child(self.render_edit_card(
+                "端口",
+                "UDP 端口",
+                Input::new(&edit.port).small().w(px(120.)),
+                cx,
+            ))
+            .child(self.render_edit_card(
+                "屏幕位置",
+                "共享屏在本机的方位",
+                self.render_position_chips(edit, cx),
+                cx,
+            ))
+            .child(self.render_edit_card(
+                "连接方式",
+                "对端在 NAT 内不可直连时选反向外呼",
+                self.render_connect_mode_chips(edit, cx),
+                cx,
+            ))
             .child(self.render_kv_section("输入映射", cx))
             .child(self.render_send_option_rows(edit, cx))
             .child(
@@ -498,24 +827,35 @@ impl Console {
             )
     }
 
-    fn render_edit_field(
+    /// 编辑表单的行卡（与共享选项三卡同语言）：左侧标签+说明、右侧
+    /// 控件，让每行右缘对齐同一张边框，避免裸 label 行的参差感。
+    /// The settings panes reuse the same card for their own rows.
+    pub(super) fn render_edit_card(
         &self,
         label: &str,
-        input: impl IntoElement,
+        hint: &str,
+        control: impl IntoElement,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
+    ) -> Div {
+        let muted = cx.theme().muted_foreground;
+        // Vertical padding matches the device-detail cards (公子: item
+        // 高上下与设备项一致 — measured 57px there vs 67px here at p_3).
         h_flex()
             .items_center()
             .gap_3()
+            .px_3()
+            .py_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
             .child(
-                div()
-                    .w_16()
-                    .flex_shrink_0()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(label.to_string()),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().text_sm().child(label.to_string()))
+                    .child(div().text_xs().text_color(muted).child(hint.to_string())),
             )
-            .child(input)
+            .child(control)
     }
 
     fn render_position_chips(&self, edit: &EditDraft, cx: &mut Context<Self>) -> impl IntoElement {
@@ -524,15 +864,12 @@ impl Console {
             ("edit-pos-right", Position::Right),
             ("edit-pos-top", Position::Top),
             ("edit-pos-bottom", Position::Bottom),
+            ("edit-pos-topleft", Position::TopLeft),
+            ("edit-pos-topright", Position::TopRight),
+            ("edit-pos-bottomleft", Position::BottomLeft),
+            ("edit-pos-bottomright", Position::BottomRight),
         ];
-        let mut row = h_flex().items_center().gap_2().child(
-            div()
-                .w_16()
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("屏幕位置"),
-        );
+        let mut row = h_flex().flex_wrap().items_center().gap_2();
         for (id, pos) in positions {
             let selected = edit.pos == pos;
             row = row.child(
@@ -561,14 +898,7 @@ impl Console {
             ("edit-mode-direct", ConnectMode::Direct, "直连"),
             ("edit-mode-reverse", ConnectMode::Reverse, "反向外呼"),
         ];
-        let mut row = h_flex().items_center().gap_2().child(
-            div()
-                .w_16()
-                .flex_shrink_0()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("连接方式"),
-        );
+        let mut row = h_flex().items_center().gap_2();
         for (id, mode, label) in modes {
             let selected = edit.connect_mode == mode;
             row = row.child(
@@ -597,7 +927,6 @@ impl Console {
         edit: &EditDraft,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
         let entity = cx.entity();
 
         let cmd_switch = {
@@ -627,20 +956,14 @@ impl Console {
                 .small()
         };
 
-        let mut col = v_flex()
-            .gap_1()
-            .child(super::settings::option_row(
-                "Command→Ctrl",
-                "仅 macOS 发送端：对端收到的 Command 键改按 Control 注入",
-                cmd_switch,
-                muted,
-            ))
-            .child(super::settings::option_row(
-                "跨越需按修饰键",
-                "开启后指针须按住所选修饰键才能进入该设备（默认靠边即切）",
-                require_switch,
-                muted,
-            ));
+        // The crossing-modifier chips belong to the same option, so they
+        // live inside that card instead of a separate bare row.
+        let mut crossing_card = self.render_edit_card(
+            "跨越需按修饰键",
+            "开启后指针须按住所选修饰键才能进入该设备（默认靠边即切）",
+            require_switch,
+            cx,
+        );
         if edit.require_crossing_modifier {
             let modifiers = [
                 ("edit-crossing-ctrl", CrossingModifier::Control, "Ctrl"),
@@ -648,14 +971,7 @@ impl Console {
                 ("edit-crossing-shift", CrossingModifier::Shift, "Shift"),
                 ("edit-crossing-super", CrossingModifier::Super, "Super"),
             ];
-            let mut row = h_flex().items_center().gap_2().child(
-                div()
-                    .w_16()
-                    .flex_shrink_0()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("修饰键"),
-            );
+            let mut row = h_flex().items_center().gap_2().mt_2();
             for (id, modifier, label) in modifiers {
                 let selected = edit.crossing_modifier == modifier;
                 row = row.child(
@@ -672,9 +988,18 @@ impl Console {
                         })),
                 );
             }
-            col = col.child(row);
+            crossing_card = crossing_card.child(row);
         }
-        col
+
+        v_flex()
+            .gap_2()
+            .child(self.render_edit_card(
+                "Command→Ctrl",
+                "仅 macOS 发送端：对端收到的 Command 键改按 Control 注入",
+                cmd_switch,
+                cx,
+            ))
+            .child(crossing_card)
     }
 
     // ── actions ──────────────────────────────────────────────────────
@@ -918,7 +1243,7 @@ fn peer_version(state: &mousehop_ipc::ClientState) -> SharedString {
         .unwrap_or_else(|| "未知".into())
 }
 
-fn latency_label(state: &mousehop_ipc::ClientState) -> SharedString {
+pub(super) fn latency_label(state: &mousehop_ipc::ClientState) -> SharedString {
     state
         .latencies
         .values()

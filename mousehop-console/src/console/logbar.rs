@@ -335,25 +335,25 @@ impl Console {
         }
     }
 
-    /// Settings overlay 日志 section: the bar toggle plus the facade
-    /// capture level (info / debug / trace, design v2.2's selector).
+    /// Settings page 日志 section: the bar toggle plus the facade
+    /// capture level (info / debug / trace, design v2.2's selector),
+    /// each as a card matching the device-detail rows.
     pub(super) fn render_log_settings(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let muted = cx.theme().muted_foreground;
         let entity = cx.entity();
 
         v_flex()
-            .child(self.render_kv_section("日志", cx))
-            .child(super::settings::option_row(
+            .gap_2()
+            .child(self.render_edit_card(
                 "调试日志",
                 "在窗口底部显示事件日志",
                 super::settings::log_switch(entity, self.debug_open),
-                muted,
+                cx,
             ))
-            .child(super::settings::option_row(
+            .child(self.render_edit_card(
                 "日志级别",
                 "依赖库日志的捕获下限（本机事件始终记录）",
                 self.render_level_buttons(cx),
-                muted,
+                cx,
             ))
     }
 

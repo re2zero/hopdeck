@@ -278,11 +278,21 @@ impl Window {
                             window,
                             move |row: ClientRow, pos_idx: u32| {
                                 if let Some(client) = window.client_by_idx(row.index() as u32) {
+                                    // Index order must match the
+                                    // position dropdown model built by
+                                    // ClientRowImp (left, right, top,
+                                    // bottom, then the four corners,
+                                    // then unplaced).
                                     let position = match pos_idx {
                                         0 => Position::Left,
                                         1 => Position::Right,
                                         2 => Position::Top,
-                                        _ => Position::Bottom,
+                                        3 => Position::Bottom,
+                                        4 => Position::TopLeft,
+                                        5 => Position::TopRight,
+                                        6 => Position::BottomLeft,
+                                        7 => Position::BottomRight,
+                                        _ => Position::Unplaced,
                                     };
                                     window.request(FrontendRequest::UpdatePosition(
                                         client.handle(),

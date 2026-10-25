@@ -19,6 +19,9 @@ image = "0.25"
 log = "0.4.20"
 mousehop-ipc = { workspace = true }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+# Motif decoration strip on X11 WMs without _GTK_FRAME_EXTENTS
+# (`window_deco.rs`); version-unified with gpui's own x11rb leaf.
+x11rb = "0.13"
 
 [features]
 # UI integration tests (src/console/ui_tests.rs), run with:
