@@ -2,13 +2,13 @@
   "version": 1,
   "project": "deskgo-cross-device-collab",
   "created": "2026-10-25T00:02:08+08:00",
-  "updated": "2026-10-25T00:52:52+08:00",
+  "updated": "2026-10-25T12:55:00+08:00",
   "milestones": [
     {
       "id": "M3a",
       "title": "",
       "acceptance": "",
-      "status": "active"
+      "status": "done"
     }
   ],
   "tasks": [
@@ -53,7 +53,7 @@
       "id": "T3",
       "title": "M3a③ PipeWire portal 采集后端（ashpd+pipewire-rs，RestoreToken 持久授权）",
       "milestone": "M3a",
-      "status": "todo",
+      "status": "done",
       "depends": [],
       "verify": {
         "type": "manual",
@@ -64,13 +64,13 @@
       "claimed_at": null,
       "result": null,
       "created": "2026-10-25T00:02:08+08:00",
-      "updated": "2026-10-25T00:02:08+08:00"
+      "updated": "2026-10-25T08:19:45+08:00"
     },
     {
       "id": "T4",
       "title": "M3a④ console RenderSurface 挂接 + 画面开关 IPC",
       "milestone": "M3a",
-      "status": "todo",
+      "status": "done",
       "depends": [],
       "verify": {
         "type": "manual",
@@ -81,13 +81,13 @@
       "claimed_at": null,
       "result": null,
       "created": "2026-10-25T00:02:08+08:00",
-      "updated": "2026-10-25T00:02:08+08:00"
+      "updated": "2026-10-25T09:46:57+08:00"
     },
     {
       "id": "T5",
       "title": "M3a⑤ PLI 关键帧重请求 + 可选 XOR parity（默认关）",
       "milestone": "M3a",
-      "status": "todo",
+      "status": "done",
       "depends": [],
       "verify": {
         "type": "manual",
@@ -98,7 +98,24 @@
       "claimed_at": null,
       "result": null,
       "created": "2026-10-25T00:02:08+08:00",
-      "updated": "2026-10-25T00:02:08+08:00"
+      "updated": "2026-10-25T11:58:12+08:00"
+    },
+    {
+      "id": "T6",
+      "title": "M3a⑥ 增量⑥剩余池：halt 后 offer() 返 None + accept loop 断连后停止宣告死端口（D39③/D38⑦）",
+      "milestone": "M3a",
+      "status": "done",
+      "depends": [],
+      "verify": {
+        "type": "manual",
+        "cmd": null
+      },
+      "attempts": 0,
+      "claimed_by": null,
+      "claimed_at": null,
+      "result": null,
+      "created": "2026-10-25T12:49:25+08:00",
+      "updated": "2026-10-25T12:50:17+08:00"
     }
   ]
 }
