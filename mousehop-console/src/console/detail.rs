@@ -15,7 +15,7 @@ use gpui_kit::{
         switch::Switch,
         v_flex,
     },
-    div,
+    div, img,
 };
 use mousehop_ipc::{ClientHandle, ConnectMode, CrossingModifier, FrontendRequest, Position};
 use std::net::IpAddr;
@@ -113,6 +113,7 @@ impl Console {
             .child(self.render_kv("对端版本", peer_version(&entry.state), muted))
             .child(self.render_kv("往返延迟", latency_label(&entry.state), muted))
             .child(self.render_share_section(entry, cx))
+            .child(self.render_video_section(entry, cx))
             .child(self.render_trust_section(entry, cx))
             .child(self.render_device_actions(entry, cx))
     }
@@ -158,6 +159,113 @@ impl Console {
                     muted,
                 )),
         )
+    }
+
+    /// Screen-view section (M3a increment ④): the picture toggle for the
+    /// device whose video offer is on file plus, while viewing, the live
+    /// frame surface fed by the daemon's local video feed socket. The
+    /// daemon owns the state — this switch mirrors `VideoState.viewing`
+    /// exactly like the clipboard row mirrors its config.
+    fn render_video_section(&self, entry: &DeviceEntry, cx: &mut Context<Self>) -> Div {
+        let muted = cx.theme().muted_foreground;
+        let handle = entry.handle;
+        let name = entry.name();
+        let is_offer = self.video.state.handle == Some(handle);
+        let viewing = self.video.state.viewing && is_offer;
+
+        let (hint, control) = if is_offer {
+            let writer = self.writer.clone();
+            let entity = cx.entity();
+            (
+                if viewing {
+                    "正在查看该设备的共享画面"
+                } else {
+                    "拉起该设备共享的画面（对方停止共享或离线即断开）"
+                },
+                Switch::new(SharedString::from(format!("video-view-{handle}")))
+                    .checked(viewing)
+                    .on_click(move |checked, _, cx| {
+                        if let Some(writer) = &writer {
+                            writer.send(FrontendRequest::SetVideoView(handle, *checked));
+                        }
+                        entity.update(cx, |this, _| {
+                            this.journal(
+                                super::logbar::LogLevel::Info,
+                                format!(
+                                    "远程查看「{name}」→ {}",
+                                    if *checked { "开" } else { "关" }
+                                ),
+                            );
+                        });
+                    })
+                    .small(),
+            )
+        } else {
+            (
+                "该设备未提供画面共享（需对方开启 [video]）",
+                Switch::new(SharedString::from(format!("video-view-{handle}")))
+                    .checked(false)
+                    .disabled(true)
+                    .small(),
+            )
+        };
+
+        let mut section = v_flex()
+            .mt_1()
+            .child(self.render_kv_section("画面", cx))
+            .child(super::settings::option_row(
+                "远程查看",
+                hint,
+                control,
+                muted,
+            ));
+        if viewing {
+            section = section.child(self.render_video_surface(cx));
+        }
+        div().child(section)
+    }
+
+    /// The live picture surface: newest decoded frame from the local
+    /// feed, letterboxed into a fixed-height panel (gpui's `img` with
+    /// Contain fit scales it; the render-period naturally drops frames
+    /// when the UI is slower than the stream).
+    fn render_video_surface(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let state = &self.video.state;
+        let stats = format!(
+            "{}×{} · {} 帧",
+            state.width, state.height, self.video.frames
+        );
+        let surface = h_flex()
+            .h_64()
+            .w_full()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .overflow_hidden()
+            .justify_center()
+            .bg(gpui_kit::black())
+            .child(match self.video.latest_image() {
+                // `Img` injects the frame's aspect ratio into its layout
+                // style, and that ratio overrides a width+height pair
+                // (observed in the increment ④ smoke: a `w_full` + `h_64`
+                // image rendered at natural height and got clipped). Fix
+                // the height alone — the width derives from the ratio —
+                // and let this row center it over the black backdrop.
+                Some(image) => img(image).h_64().flex_shrink_0().into_any_element(),
+                None => h_flex()
+                    .size_full()
+                    .items_center()
+                    .justify_center()
+                    .text_sm()
+                    .text_color(muted)
+                    .child("等待画面…")
+                    .into_any_element(),
+            });
+        v_flex()
+            .gap_1()
+            .child(surface)
+            .child(div().text_xs().text_color(muted).child(stats))
     }
 
     /// Inline trust state (design D15): once the peer's fingerprint is
@@ -295,10 +403,10 @@ impl Console {
         row.child(
             Button::new("remote-view")
                 .icon(Icon::new(IconName::Eye))
-                .label("远程查看 · 即将支持")
+                .label("远程查看")
                 .outline()
                 .small()
-                .disabled(true),
+                .disabled(!self.video.state.available),
         )
     }
 

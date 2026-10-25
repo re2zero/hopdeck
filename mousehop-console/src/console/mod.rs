@@ -19,6 +19,7 @@ pub(crate) mod logbar;
 mod settings;
 #[cfg(all(test, feature = "ui-test-support"))]
 mod ui_tests;
+mod video;
 
 use crate::ipc::{FeedEvent, RequestWriter};
 use gpui_kit::prelude::FluentBuilder;
@@ -111,6 +112,9 @@ pub struct Console {
     log_sink: LogSink,
     log_gen_seen: std::cell::Cell<u64>,
     log_scroll: ScrollHandle,
+    /// Screen view (M3a increment ④): the daemon's video-channel mirror
+    /// plus the local frame buffer fed by the video feed socket.
+    video: video::VideoView,
     /// Window access for notifications and input edits outside event
     /// handlers (subscribe callbacks have no `&mut Window`).
     window: AnyWindowHandle,
@@ -251,6 +255,7 @@ impl Console {
             .unwrap_or_else(|_| "本机".to_string());
 
         let log_level = logbar::initial_level();
+        let video_tx = video::spawn_tick_pump(cx);
         let console = Self {
             feed: FeedState::Connecting,
             writer: None,
@@ -280,6 +285,7 @@ impl Console {
             log_sink,
             log_gen_seen: std::cell::Cell::new(0),
             log_scroll: ScrollHandle::new(),
+            video: video::VideoView::new(video_tx),
             window: window.window_handle(),
         };
         console.spawn_log_poll(cx);
@@ -318,6 +324,7 @@ impl Console {
                 self.awaiting_auth.clear();
                 self.settings_open = false;
                 self.self_fingerprint = None;
+                self.video.reset();
             }
             FeedEvent::Daemon(event) => self.apply_daemon_event(*event, cx),
         }
@@ -426,7 +433,44 @@ impl Console {
             FrontendEvent::DeviceConnected { fingerprint, .. } => {
                 self.awaiting_auth.remove(&fingerprint);
             }
+            FrontendEvent::VideoState {
+                handle,
+                viewing,
+                available,
+                width,
+                height,
+                max_fps,
+            } => {
+                let was_viewing = self.video.state.viewing;
+                self.video.daemon_state(video::VideoStateMirror {
+                    handle,
+                    viewing,
+                    available,
+                    width,
+                    height,
+                    max_fps,
+                });
+                if !was_viewing && viewing {
+                    self.journal(LogLevel::Ok, "画面通道已连接");
+                } else if was_viewing && !viewing {
+                    self.journal(LogLevel::Info, "画面通道已断开");
+                }
+            }
             _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Wake-ups from the local video feed reader thread (`video.rs`).
+    fn on_video_tick(&mut self, tick: video::VideoTick, cx: &mut Context<Self>) {
+        match tick {
+            video::VideoTick::Frame => self.video.frames += 1,
+            video::VideoTick::Ended => {
+                if self.video.state.viewing {
+                    self.journal(LogLevel::Warn, "画面通道异常断开");
+                }
+                self.video.on_feed_ended();
+            }
         }
         cx.notify();
     }

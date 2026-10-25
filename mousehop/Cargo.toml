@@ -109,6 +109,11 @@ x11_emulation = ["input-emulation/x11"]
 rdp_emulation = ["input-emulation/remote_desktop_portal"]
 usbip_emulation = ["input-emulation/usbip"]
 video = ["dep:mousehop-video"]
+# xdg-desktop-portal ScreenCast capture source for the video channel
+# (Linux only, via mousehop-video's `portal` feature). Out of default on
+# purpose: it drags in libpipewire and the picker dialog needs a real
+# desktop session anyway.
+video_portal = ["video", "mousehop-video/portal"]
 
 [package.metadata.bundle]
 name = "Mousehop"

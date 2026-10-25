@@ -688,19 +688,39 @@ side opts in with a `[video]` section:
 enabled = true
 # port = 0        # 0 (default) = ephemeral port, announced to the peer
                    # dynamically — no fixed firewall entry needed
-# width = 1280     # announced geometry (v1: config-driven test-pattern
-# height = 720     # source; real display capture arrives with portal support)
+# source = "portal" # "dummy" (default) = built-in color-bar test pattern;
+                    # "portal" (Linux, `video_portal` build feature) captures
+                    # the real desktop via the xdg-desktop-portal ScreenCast
+                    # API (PipeWire). The first run pops the compositor's
+                    # screen-picker dialog; the granted restore token is
+                    # logged so a future release can persist it in this
+                    # section and skip the dialog.
+# width = 1280     # dummy-source geometry (the portal source announces the
+# height = 720     # real negotiated display size instead)
 # max_fps = 30
+# parity = false   # XOR parity: one recovery packet per group of 8 data
+                   # packets, so a single lost packet is rebuilt instead of
+                   # dropping to the next keyframe. Off by default; both
+                   # peers need this release (older receivers ignore the
+                   # parity flag and misread the stream).
 ```
 
 When a session is established and video is enabled, the controlled machine
 announces the channel via a `VideoOffer` and the controller dials on demand;
-the offer is re-announced on every new session generation. v1 restrictions:
+the offer is re-announced on every new session generation. Loss handling is
+LAN-tuned: the receiver detects unrecoverable gaps and answers with a one-way
+keyframe request (PLI) that forces an IDR, without any retransmission
+station; parity above is the optional belt-and-suspenders. v1 restrictions:
 direct topology only (a `reverse` session has no inbound path for the video
 dial), admission is strictly by `authorized_fingerprints` (an access password
 never admits a peer to the video channel — there is no protocol-level
-challenge on it to gate the stream), and viewing/rendering in the console
-frontend is not wired up yet.
+challenge on it to gate the stream).
+
+The GPUI console can view the picture: a device's detail page has a
+「画面 · 远程查看」 toggle that dials/hangs up the video channel
+(`SetVideoView` over the IPC socket). Frames ride a separate binary Unix
+socket (`mousehop-video.sock` next to the IPC socket) so the JSON state
+channel never carries pixels.
 
 ## Detailed OS Support
 

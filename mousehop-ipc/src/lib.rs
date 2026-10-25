@@ -21,10 +21,15 @@ pub use input_event::{CrossingModifier, scancode};
 mod connect;
 mod connect_async;
 mod listen;
+mod video_feed;
 
 pub use connect::{FrontendEventReader, FrontendRequestWriter, connect, connect_once};
 pub use connect_async::{AsyncFrontendEventReader, AsyncFrontendRequestWriter, connect_async};
 pub use listen::AsyncFrontendListener;
+pub use video_feed::{
+    FRAME_HEADER_LEN, VideoFeedFrame, VideoFeedHandle, connect_video_feed, decode_frame,
+    encode_frame, read_video_frame, video_socket_path,
+};
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -729,6 +734,26 @@ pub enum FrontendEvent {
     /// enumeration isn't reachable (no compositor support, missing
     /// permissions, transient race).
     RunningApps(Vec<RunningApp>),
+    /// Screen-sharing state on the controlling side (M3a): the device
+    /// whose video offer is on file (`None` = none), whether this
+    /// machine is currently viewing it, and the announced geometry.
+    /// Pushed whenever any of that changes and on `Sync`. The frame
+    /// pixels themselves ride the separate binary video feed socket
+    /// (`video_feed`), never this JSON channel.
+    VideoState {
+        #[serde(default)]
+        handle: Option<ClientHandle>,
+        #[serde(default)]
+        viewing: bool,
+        #[serde(default)]
+        available: bool,
+        #[serde(default)]
+        width: u16,
+        #[serde(default)]
+        height: u16,
+        #[serde(default)]
+        max_fps: u16,
+    },
 }
 
 /// One running-app candidate for the suppression-list picker. The
@@ -862,6 +887,13 @@ pub enum FrontendRequest {
     /// populated. The daemon replies with a
     /// [`FrontendEvent::RunningApps`].
     ListRunningApps,
+    /// Start or stop viewing a device's shared screen (M3a). The
+    /// daemon dials that peer's video channel when it holds a live
+    /// `VideoOffer` from it (and tears the channel down on `false`).
+    /// State changes echo back via [`FrontendEvent::VideoState`]; the
+    /// daemon's `[video] enabled` config on the *sharing* side remains
+    /// the master switch.
+    SetVideoView(ClientHandle, bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -950,6 +982,56 @@ mod tests {
             let s = serde_json::to_string(&original).expect("encode");
             let decoded: AppIdent = serde_json::from_str(&s).expect("decode");
             assert_eq!(original, decoded, "round-trip mismatch: {s}");
+        }
+    }
+
+    #[test]
+    fn video_state_event_round_trip_and_defaults() {
+        let event = FrontendEvent::VideoState {
+            handle: Some(7),
+            viewing: true,
+            available: true,
+            width: 320,
+            height: 180,
+            max_fps: 30,
+        };
+        let s = serde_json::to_string(&event).expect("encode");
+        match serde_json::from_str::<FrontendEvent>(&s).expect("decode") {
+            FrontendEvent::VideoState {
+                handle,
+                viewing,
+                available,
+                width,
+                height,
+                max_fps,
+            } => {
+                assert_eq!(handle, Some(7));
+                assert!(viewing);
+                assert!(available);
+                assert_eq!((width, height, max_fps), (320, 180, 30));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        // A newer daemon omitting newly-added fields must still decode
+        // (the variant's fields are all `#[serde(default)]`).
+        let decoded: FrontendEvent =
+            serde_json::from_str(r#"{"VideoState":{"handle":7,"viewing":true}}"#)
+                .expect("lenient decode");
+        match decoded {
+            FrontendEvent::VideoState {
+                handle,
+                viewing,
+                available,
+                width,
+                ..
+            } => {
+                assert_eq!(handle, Some(7));
+                assert!(viewing);
+                assert!(!available);
+                assert_eq!(width, 0);
+            }
+            other => panic!("unexpected variant: {other:?}"),
         }
     }
 

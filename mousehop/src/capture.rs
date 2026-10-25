@@ -68,6 +68,10 @@ pub(crate) enum ICaptureEvent {
     /// prompts the frontend, which replies via
     /// `FrontendRequest::SubmitAccessPassword`. `addr` is the peer's IP.
     PasswordRequired(std::net::IpAddr),
+    /// The controlling-side video channel changed (offer on file,
+    /// viewing toggled, session ended). Forwarded so Service mirrors
+    /// `FrontendEvent::VideoState` to the frontends.
+    VideoState(crate::video::VideoStateInfo),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,6 +113,11 @@ enum CaptureRequest {
     SetCommandAsCtrl(CaptureHandle, bool),
     /// Update the optional modifier gate for a client's next crossing.
     SetCrossingModifier(CaptureHandle, Option<CrossingModifier>),
+    /// Start/stop viewing a client's shared screen (M3a increment ④'s
+    /// frontend picture toggle). The video peer dials or tears down the
+    /// matching receive channel; the state change is echoed upward as
+    /// [`ICaptureEvent::VideoState`].
+    SetVideoView(CaptureHandle, bool),
 }
 
 impl Capture {
@@ -234,6 +243,12 @@ impl Capture {
         let _ = self
             .request_tx
             .send(CaptureRequest::SetCrossingModifier(handle, modifier));
+    }
+
+    pub(crate) fn set_video_view(&self, handle: CaptureHandle, view: bool) {
+        let _ = self
+            .request_tx
+            .send(CaptureRequest::SetVideoView(handle, view));
     }
 }
 
@@ -949,6 +964,14 @@ impl CaptureTask {
         self.next_handover_serial
     }
 
+    /// Push the video channel's current mirror up to Service (offer on
+    /// file / viewing / geometry) after anything mutated it.
+    fn emit_video_state(&self) {
+        self.event_tx
+            .send(ICaptureEvent::VideoState(self.video.state()))
+            .expect("channel closed");
+    }
+
     async fn run(mut self) {
         loop {
             if let Err(e) = self.do_capture().await {
@@ -978,6 +1001,10 @@ impl CaptureTask {
                         }
                         CaptureRequest::SetCrossingModifier(handle, modifier) => {
                             self.set_crossing_modifier(handle, modifier);
+                        }
+                        CaptureRequest::SetVideoView(handle, view) => {
+                            self.video.set_view(handle, view);
+                            self.emit_video_state();
                         }
                     },
                     _ = self.cancellation_token.cancelled() => return,
@@ -1120,6 +1147,7 @@ impl CaptureTask {
                             });
                             // The peer's video offer died with its session.
                             self.video.peer_gone(handle, session);
+                            self.emit_video_state();
                             if self
                                 .modeling_disabled_for
                                 .is_some_and(|(peer, generation, _)| {
@@ -1162,10 +1190,11 @@ impl CaptureTask {
                     match event {
                         ProtoEvent::VideoOffer { .. } | ProtoEvent::VideoStop => {
                             // v1 keeps a single video channel and the newest
-                            // offer wins; the console picture picker arrives
-                            // with increment ④.
+                            // offer wins; dialing is the frontend's view
+                            // toggle (increment ④), not automatic.
                             let addr = peer_addr.expect("video events always carry an addr");
                             self.video.handle_proto(handle, session, addr, &event);
+                            self.emit_video_state();
                         }
                         ProtoEvent::Ack(serial) => {
                             let completed = self.state == State::WaitingForAck
@@ -1487,6 +1516,10 @@ impl CaptureTask {
                                 .set_crossing_modifier(pos, self.crossing_modifier_at(pos))
                                 .await?;
                         }
+                    }
+                    CaptureRequest::SetVideoView(handle, view) => {
+                        self.video.set_view(handle, view);
+                        self.emit_video_state();
                     }
                 },
                 _ = self.cancellation_token.cancelled() => break,

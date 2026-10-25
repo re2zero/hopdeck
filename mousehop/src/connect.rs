@@ -118,6 +118,15 @@ pub(crate) enum MousehopConnectionEvent {
 /// value. The auth events must pass the gate precisely so the challenge
 /// can complete before the handshake does; every other event stays
 /// dropped until `hello_ok` flips.
+///
+/// `VideoOffer`/`VideoStop` are the one deliberate addition (D39): the
+/// sharing side announces its video port the moment the input session
+/// comes up, which races the controlling side's `Hello` echo and used
+/// to lose every offer. They only ever *store* an offer inside the
+/// capture state machine — the controlling side dials nothing until the
+/// frontend asks (increment ④'s view toggle) — so an early arrival
+/// cannot affect input state, and a fresher offer supersedes the
+/// stored one.
 pub(crate) fn handshake_allows_event(hello_ok: bool, event: &ProtoEvent) -> bool {
     hello_ok
         || matches!(
@@ -126,6 +135,8 @@ pub(crate) fn handshake_allows_event(hello_ok: bool, event: &ProtoEvent) -> bool
                 | ProtoEvent::AuthRequired { .. }
                 | ProtoEvent::AuthPassword { .. }
                 | ProtoEvent::AuthResult { .. }
+                | ProtoEvent::VideoOffer { .. }
+                | ProtoEvent::VideoStop
         )
 }
 

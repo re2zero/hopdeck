@@ -16,8 +16,17 @@ pub enum VideoError {
     #[error("packet payload of {0} bytes exceeds the {1} byte limit")]
     PacketTooLarge(usize, usize),
 
+    #[error("malformed parity packet: {0}")]
+    Parity(String),
+
     #[error("codec failure: {0}")]
     Codec(String),
+
+    #[error("portal screencast failure: {0}")]
+    Portal(String),
+
+    #[error("pipewire capture failure: {0}")]
+    PipeWire(String),
 
     #[error(transparent)]
     Openh264(#[from] openh264::Error),

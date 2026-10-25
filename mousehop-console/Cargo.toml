@@ -13,6 +13,9 @@ gpui-base = "0.8.0"
 gpui-component = "0.8.0"
 gpui-kit = "0.8.0"
 hostname = "0.4.0"
+# Decoded-frame → `RenderImage` handoff; version-unified with gpui-pre's
+# `image` (the lockfile already carries it).
+image = "0.25"
 log = "0.4.20"
 mousehop-ipc = { workspace = true }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }

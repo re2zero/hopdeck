@@ -121,11 +121,24 @@ pub struct TomlVideo {
     /// port announced dynamically via `VideoOffer`, so no fixed
     /// firewall entry is needed.
     port: Option<u16>,
-    /// Pattern/source geometry announced in `VideoOffer` (v1 sources are
-    /// config-driven; portal capture revisits this in increment ③).
+    /// Capture backend: `"dummy"` (test pattern, default) or `"portal"`
+    /// (xdg-desktop-portal ScreenCast, Linux only — a daemon built without
+    /// portal support logs a warning and stays off). Unknown values fall
+    /// back to `dummy` with a warning; a broken `[video]` section must not
+    /// take input sharing down.
+    source: Option<String>,
+    /// Pattern geometry announced in `VideoOffer` when the source cannot
+    /// report a size (`dummy`), and the fallback announcement while a
+    /// `portal` session is still negotiating.
     width: Option<u16>,
     height: Option<u16>,
     max_fps: Option<u8>,
+    /// XOR parity on the video channel: one recovery packet per group of
+    /// 8 data packets, making any single lost packet reconstructable.
+    /// Default `false` (LAN loss is rare; PLI keyframe re-request covers
+    /// the rest). Both peers need this release — older receivers ignore
+    /// the parity flag and misread the stream.
+    parity: Option<bool>,
 }
 
 /// Resolved `[video]` configuration (defaults filled in).
@@ -133,9 +146,27 @@ pub struct TomlVideo {
 pub struct VideoConfig {
     pub enabled: bool,
     pub port: u16,
+    /// Capture backend selected by `[video] source`.
+    pub source: VideoSourceKind,
+    /// Announced geometry when the source cannot report a size (`dummy`),
+    /// and the fallback while a `portal` session is still negotiating.
     pub width: u16,
     pub height: u16,
     pub max_fps: u8,
+    /// XOR parity packets on the video channel (design §6, increment ⑤).
+    pub parity: bool,
+}
+
+/// Capture backend for the video channel (`[video] source`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum VideoSourceKind {
+    /// Deterministic color-bar pattern — drives every automated test
+    /// (headless environments have no portal).
+    #[default]
+    Dummy,
+    /// xdg-desktop-portal ScreenCast + PipeWire (Linux, needs the
+    /// `video_portal` build feature; unavailable builds log and stay off).
+    Portal,
 }
 
 impl Default for VideoConfig {
@@ -143,9 +174,11 @@ impl Default for VideoConfig {
         Self {
             enabled: false,
             port: 0,
+            source: VideoSourceKind::default(),
             width: 1280,
             height: 720,
             max_fps: 30,
+            parity: false,
         }
     }
 }
@@ -226,16 +259,25 @@ impl ConfigToml {
         let Some(video) = self.video.as_ref() else {
             return VideoConfig::default();
         };
+        let defaults = VideoConfig::default();
+        // Lenient by design: a mistyped `source` downgrades to the dummy
+        // pattern with a warning instead of failing the whole config load.
+        let source = match video.source.as_deref() {
+            None | Some("dummy") => VideoSourceKind::Dummy,
+            Some("portal") => VideoSourceKind::Portal,
+            Some(other) => {
+                log::warn!("config [video] source = {other:?} is not dummy|portal — using dummy");
+                VideoSourceKind::Dummy
+            }
+        };
         VideoConfig {
             enabled: video.enabled.unwrap_or(false),
             port: video.port.unwrap_or(0),
-            width: video.width.unwrap_or_else(|| VideoConfig::default().width),
-            height: video
-                .height
-                .unwrap_or_else(|| VideoConfig::default().height),
-            max_fps: video
-                .max_fps
-                .unwrap_or_else(|| VideoConfig::default().max_fps),
+            source,
+            width: video.width.unwrap_or(defaults.width),
+            height: video.height.unwrap_or(defaults.height),
+            max_fps: video.max_fps.unwrap_or(defaults.max_fps),
+            parity: video.parity.unwrap_or(defaults.parity),
         }
     }
 }
@@ -1300,6 +1342,8 @@ port = 4262
         assert_eq!(resolved.width, 1280);
         assert_eq!(resolved.height, 720);
         assert_eq!(resolved.max_fps, 30);
+        assert_eq!(resolved.source, VideoSourceKind::Dummy);
+        assert!(!resolved.parity, "parity is off by default");
     }
 
     #[test]
@@ -1316,9 +1360,11 @@ port = 4262
 [video]
 enabled = true
 port = 0
+source = "dummy"
 width = 320
 height = 180
 max_fps = 60
+parity = true
 "#;
         let config: ConfigToml = toml::from_str(toml_source).expect("parse");
         assert_eq!(
@@ -1326,9 +1372,11 @@ max_fps = 60
             VideoConfig {
                 enabled: true,
                 port: 0,
+                source: VideoSourceKind::Dummy,
                 width: 320,
                 height: 180,
                 max_fps: 60,
+                parity: true,
             }
         );
 
@@ -1341,5 +1389,14 @@ max_fps = 60
         let plain: ConfigToml = toml::from_str("port = 4242").expect("parse");
         let plain_serialized = toml::to_string_pretty(&plain).expect("serialize");
         assert!(!plain_serialized.contains("[video]"));
+    }
+
+    #[test]
+    fn video_source_parses_and_falls_back_leniently() {
+        let portal: ConfigToml = toml::from_str("[video]\nsource = \"portal\"").expect("parse");
+        assert_eq!(portal.video().source, VideoSourceKind::Portal);
+
+        let mistyped: ConfigToml = toml::from_str("[video]\nsource = \"pipewire\"").expect("parse");
+        assert_eq!(mistyped.video().source, VideoSourceKind::Dummy);
     }
 }

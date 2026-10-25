@@ -7,11 +7,12 @@
 //! - [`codec`]: [`codec::VideoEncoder`]/[`codec::VideoDecoder`] traits with an
 //!   OpenH264 software backend (H.264 baseline, no B frames).
 //! - [`transport`]: datagram framing `[seq u16][flags u8][ts u32][len u16]`
-//!   with payload capped below typical MTU, plus reassembly with gap
-//!   detection.
+//!   with payload capped below typical MTU, reassembly with gap detection,
+//!   optional XOR parity recovery, and one-way keyframe requests (PLI).
 //!
 //! The wire format and trait surface are stable targets for the daemon video
-//! channel (increment ②); parity and keyframe re-request land in increment ⑤.
+//! channel (increment ②); loss recovery and keyframe re-request landed in
+//! increment ⑤.
 
 pub mod capture;
 pub mod codec;

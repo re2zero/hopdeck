@@ -107,6 +107,10 @@ pub struct Service {
     /// Video channel sender (M3a). Inert unless the `video` feature is
     /// compiled and `[video] enabled = true` — `offer()` returns `None`.
     video: crate::video::VideoHost,
+    /// Last mirror the capture side reported for the controlling-side
+    /// video channel (offer on file / viewing / geometry). Broadcast as
+    /// `FrontendEvent::VideoState` on change and on `Sync`.
+    video_state: crate::video::VideoStateInfo,
     /// Startup snapshot of per-client tunnel forwards. The ipc
     /// `ClientConfig` doesn't carry them (no protocol change), so
     /// `save_config` re-attaches them from here; entries are dropped when
@@ -382,6 +386,7 @@ impl Service {
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
             video,
+            video_state: Default::default(),
             tunnel_forwards: forward_specs,
             remote_host_states: Default::default(),
             next_trigger_handle: 0,
@@ -662,6 +667,14 @@ impl Service {
             FrontendRequest::ListRunningApps => {
                 let apps = frontmost_app::list_running_apps();
                 self.notify_frontend(FrontendEvent::RunningApps(apps));
+            }
+            FrontendRequest::SetVideoView(handle, view) => {
+                // The capture state machine owns the video peer; the
+                // state change echoes back as `VideoState` and is
+                // broadcast from there. When no capture backend is
+                // running the request loop still processes it, so the
+                // toggle works without a capture backend too.
+                self.capture.set_video_view(handle, view);
             }
         }
     }
@@ -1224,6 +1237,33 @@ impl Service {
                 log::info!("peer {addr} requires the access password; prompting frontend");
                 self.notify_frontend(FrontendEvent::PasswordRequired { addr });
             }
+            ICaptureEvent::VideoState(info) => {
+                if info != self.video_state {
+                    log::debug!(
+                        "video state: offer for {:?}, viewing={} ({}x{}@{}fps)",
+                        info.handle,
+                        info.viewing,
+                        info.width,
+                        info.height,
+                        info.max_fps
+                    );
+                    self.video_state = info.clone();
+                    self.notify_frontend(self.video_state_event());
+                }
+            }
+        }
+    }
+
+    /// Build the frontend event from the current mirror. Kept beside
+    /// `handle_capture_event` so the two stay field-for-field in sync.
+    fn video_state_event(&self) -> FrontendEvent {
+        FrontendEvent::VideoState {
+            handle: self.video_state.handle,
+            viewing: self.video_state.viewing,
+            available: self.video_state.available,
+            width: self.video_state.width,
+            height: self.video_state.height,
+            max_fps: self.video_state.max_fps,
         }
     }
 
@@ -1532,6 +1572,7 @@ impl Service {
         self.notify_frontend(FrontendEvent::MdnsDiscovery(self.config.mdns_discovery()));
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
+        self.notify_frontend(self.video_state_event());
         let host_list = self.config.clipboard_suppression().host().clone();
         self.notify_frontend(FrontendEvent::SuppressedAppsUpdated(host_list));
         let recovery_events: Vec<_> = self

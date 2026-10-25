@@ -31,8 +31,7 @@ async fn loopback_without_loss_is_pixel_exact() {
             .packetize(&encoded, frame.index as u32 * 33, DEFAULT_MTU)
             .unwrap()
         {
-            let wire = re.push(pkt).unwrap();
-            if let Some(access_unit) = wire {
+            for access_unit in re.push(pkt).unwrap() {
                 let img = dec
                     .decode(&access_unit)
                     .unwrap()
@@ -113,7 +112,7 @@ async fn loopback_recovers_after_packet_loss() {
             if frame.index == 10 && i == 1 {
                 continue;
             }
-            if let Some(access_unit) = re.push(pkt).unwrap() {
+            if let Some(access_unit) = re.push(pkt).unwrap().pop() {
                 // Frames that cannot decode report None and are skipped.
                 if let Some(img) = dec.decode(&access_unit).unwrap() {
                     assert_eq!(img.width, W7);
@@ -128,9 +127,55 @@ async fn loopback_recovers_after_packet_loss() {
         1,
         "frame 10's fragments must be counted lost"
     );
+    assert!(
+        re.keyframe_requests() >= 1,
+        "the unrecoverable gap must raise a keyframe request"
+    );
     assert_eq!(
         decoded_indices,
         (0..10).chain(20..FRAMES).collect::<Vec<_>>(),
         "stream must resume pixel-exact at the next keyframe"
     );
+}
+
+#[tokio::test]
+async fn parity_recovers_single_packet_loss_pixel_exact() {
+    // Same loss as above, but with XOR parity on: the dropped packet is
+    // rebuilt and the stream never skips a beat (design §10 loss matrix,
+    // "lose 1 → recover" branch).
+    const W7: u32 = 1280;
+    const H7: u32 = 720;
+    const FRAMES: u64 = 30;
+    let mut src = DummyVideoSource::new(W7, H7, 480, Some(FRAMES));
+    let mut enc = OpenH264Encoder::new(10).unwrap();
+    let mut pz = Packetizer::with_parity(4);
+    let mut re = Reassembler::new();
+    let mut dec = OpenH264Decoder::new().unwrap();
+
+    let mut decoded_indices = Vec::new();
+    while let Some(frame) = futures::StreamExt::next(&mut src).await {
+        let encoded = enc.encode(&frame, false).unwrap();
+        for (i, pkt) in pz
+            .packetize(&encoded, frame.index as u32 * 33, DEFAULT_MTU)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            // Drop one packet well after the first parity group has been
+            // seen (recovery engages from there — module docs).
+            if frame.index == 15 && i == 1 {
+                continue;
+            }
+            for access_unit in re.push(pkt).unwrap() {
+                if let Some(img) = dec.decode(&access_unit).unwrap() {
+                    assert_eq!(img.width, W7);
+                    decoded_indices.push(read_pattern_index(&img));
+                }
+            }
+        }
+    }
+
+    assert_eq!(decoded_indices, (0..FRAMES).collect::<Vec<_>>());
+    assert_eq!(re.lost_frames(), 0, "parity erased the loss");
+    assert_eq!(re.keyframe_requests(), 0, "no keyframe needed");
 }
