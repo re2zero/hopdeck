@@ -175,6 +175,30 @@ fn clicking_device_row_selects_it(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_general_video_share_switch_follows_daemon_echo(cx: &mut TestAppContext) {
+    // P1.2: the 常规 tab's screen-sharing switch renders from the
+    // daemon's `VideoShare` echo (not a local optimistic flip), and a
+    // click with no daemon attached must be a silent no-op.
+    let (window, content) = open_console(cx);
+    cx.update_window(window, |_, window, cx| {
+        content.update(cx, |console, _| console.settings_open = true);
+        frame(window, cx);
+        require(window, "settings-video-share".into());
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::VideoShare { enabled: true })),
+                cx,
+            );
+        });
+        frame(window, cx);
+        click(window, "settings-video-share".into(), cx);
+        let enabled = content.read_with(cx, |console, _| console.video_share_enabled);
+        assert!(enabled, "echoed on-state must survive a writerless click");
+    })
+    .unwrap();
+}
+
+#[gpui::test]
 fn settings_panes_render_peer_card_controls(cx: &mut TestAppContext) {
     // Regression: the settings scroll container used to lay its content
     // out at content width, so the security pane's explainer line pushed

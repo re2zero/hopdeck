@@ -123,6 +123,11 @@ pub struct Console {
     /// Screen view (M3a increment ④): the daemon's video-channel mirror
     /// plus the local frame buffer fed by the video feed socket.
     video: video::VideoView,
+    /// Sharing-side master switch mirror (`VideoShare`, pushed on
+    /// change and on `Sync`): whether this machine shares its screen
+    /// at all. The settings switch renders from this echo, so a
+    /// dropped send just leaves the switch unmoved.
+    video_share_enabled: bool,
     /// Window access for notifications and input edits outside event
     /// handlers (subscribe callbacks have no `&mut Window`).
     window: AnyWindowHandle,
@@ -302,6 +307,7 @@ impl Console {
             log_gen_seen: std::cell::Cell::new(0),
             log_scroll: ScrollHandle::new(),
             video: video::VideoView::new(video_tx),
+            video_share_enabled: false,
             window: window.window_handle(),
         };
         console.spawn_log_poll(cx);
@@ -480,6 +486,19 @@ impl Console {
                 } else if was_viewing && !viewing {
                     self.journal(LogLevel::Info, "画面通道已断开");
                 }
+            }
+            FrontendEvent::VideoShare { enabled } => {
+                if self.video_share_enabled != enabled {
+                    self.journal(
+                        LogLevel::Info,
+                        if enabled {
+                            "画面共享已开启：已信任设备可查看本机屏幕"
+                        } else {
+                            "画面共享已关闭"
+                        },
+                    );
+                }
+                self.video_share_enabled = enabled;
             }
             _ => {}
         }

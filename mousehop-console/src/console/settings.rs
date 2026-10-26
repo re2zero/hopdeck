@@ -1,11 +1,12 @@
 //! Settings overlay (design v2.2's `.mh-settings`): a centered sheet
 //! over the main area with a five-entry nav — 常规 / 连接 / 安全 / 云端
 //! / 高级. The daemon-backed controls live where the design puts them:
-//! identity and the listen port under 常规, the per-trusted-peer
-//! receive-side options (D22 semantics) plus trust management under
-//! 安全, logging and the emulation backend under 高级. 连接 and 云端
-//! are guidance/placeholder pages: their mock controls have no IPC
-//! behind them yet, and rendering a dead control would lie.
+//! identity, the listen port and the screen-sharing master switch
+//! (P1.2) under 常规, the per-trusted-peer receive-side options (D22
+//! semantics) plus trust management under 安全, logging and the
+//! emulation backend under 高级. 连接 and 云端 are guidance/placeholder
+//! pages: their mock controls have no IPC behind them yet, and
+//! rendering a dead control would lie.
 
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
@@ -211,6 +212,45 @@ impl Console {
                 div().text_xs().text_color(muted).child(
                     "局域网发现（mDNS）由 config.toml 的 mdns_discovery 控制，改动重启生效。",
                 ),
+            )
+            .child(self.render_kv_section("画面共享", cx))
+            .child(self.render_video_share_card(cx))
+    }
+
+    /// 画面共享 master switch (P1.2): flips the daemon's `[video]`
+    /// enabled live via `SetVideoEnabled`. The switch renders from the
+    /// `VideoShare` echo rather than a local optimistic flip, so a
+    /// dropped request simply leaves it unmoved — same contract as the
+    /// per-peer switches on the 安全 tab.
+    fn render_video_share_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let muted = cx.theme().muted_foreground;
+        let writer = self.writer.clone();
+        v_flex()
+            .id("settings-video-share-card")
+            .test_support()
+            .gap_2()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .child(option_row(
+                "允许其他设备查看本机屏幕",
+                "开启后，已信任的设备即可连接本机的画面通道；首次被查看时系统会弹出屏幕选择框（选择结果当前不跨重启保留）。",
+                Switch::new("settings-video-share")
+                    .checked(self.video_share_enabled)
+                    .on_click(move |checked, _, _| {
+                        if let Some(writer) = &writer {
+                            writer.send(FrontendRequest::SetVideoEnabled(*checked));
+                        }
+                    })
+                    .small(),
+                muted,
+            ))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("画面经端到端 DTLS 加密传输；未在本机授权（信任）的设备无法连接画面通道。"),
             )
     }
 

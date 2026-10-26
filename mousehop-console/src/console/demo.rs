@@ -148,6 +148,7 @@ impl Console {
             FrontendEvent::CaptureStatus(Status::Enabled),
             FrontendEvent::EmulationStatus(Status::Enabled),
             FrontendEvent::PublicKeyFingerprint(FP_SELF.to_string()),
+            FrontendEvent::VideoShare { enabled: true },
             FrontendEvent::Enumerate(devices),
             FrontendEvent::AuthorizedUpdated(HashMap::from([
                 (
