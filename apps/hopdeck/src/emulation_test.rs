@@ -1,7 +1,7 @@
 use crate::config::Config;
 use clap::Args;
 use input_emulation::{InputEmulation, InputEmulationError};
-use input_event::{Event, PointerEvent};
+use input_event::{Event, KeyboardEvent, PointerEvent};
 use std::f64::consts::PI;
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ pub struct TestEmulationArgs {
     scroll: bool,
 }
 
-pub async fn run(config: Config, _args: TestEmulationArgs) -> Result<(), InputEmulationError> {
+pub async fn run(config: Config, args: TestEmulationArgs) -> Result<(), InputEmulationError> {
     log::info!("running input emulation test");
 
     let backend = config.emulation_backend().map(|b| b.into());
@@ -27,6 +27,10 @@ pub async fn run(config: Config, _args: TestEmulationArgs) -> Result<(), InputEm
 
     let start = Instant::now();
     let mut offset = (0, 0);
+    // `--keyboard`: one A press/release every two seconds. `key` is the
+    // Linux evdev code; each sink applies its own keycode translation.
+    let mut key_state = 0u8;
+    let mut key_next = Instant::now();
     loop {
         tokio::time::sleep(Duration::from_millis(1)).await;
         let elapsed = start.elapsed();
@@ -41,6 +45,36 @@ pub async fn run(config: Config, _args: TestEmulationArgs) -> Result<(), InputEm
             let (dx, dy) = (relative_motion.0 as f64, relative_motion.1 as f64);
             let event = Event::Pointer(PointerEvent::Motion { time: 0, dx, dy });
             emulation.consume(event, 0).await?;
+        }
+        if args.keyboard {
+            let now = Instant::now();
+            if key_state == 0 && now >= key_next {
+                key_state = 1;
+                key_next = now + Duration::from_millis(150);
+                emulation
+                    .consume(
+                        Event::Keyboard(KeyboardEvent::Key {
+                            time: 0,
+                            key: 30,
+                            state: 1,
+                        }),
+                        0,
+                    )
+                    .await?;
+            } else if key_state == 1 && now >= key_next {
+                key_state = 0;
+                key_next = now + Duration::from_secs(2);
+                emulation
+                    .consume(
+                        Event::Keyboard(KeyboardEvent::Key {
+                            time: 0,
+                            key: 30,
+                            state: 0,
+                        }),
+                        0,
+                    )
+                    .await?;
+            }
         }
     }
 }
