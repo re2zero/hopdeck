@@ -1,16 +1,17 @@
-# 项目计划：DeskGo 跨设备协同（Mousehop 三期能力）
+# 项目计划：桌联 HopDeck 跨设备协同（原 DeskGo / Mousehop 三期能力）
 
 <!-- 本文件是接力的「计划层」真相源：里程碑完成就勾选，决策与死路只追加不删改。
      全部完成或终止时：在文件顶部另起一行写入「退出标记」——HTML 注释内写 RELAY:EXIT。 -->
 
 ## 目标与范围
-在 Mousehop v0.17.1（lan-mouse 系 Rust 工作区）上新增三项能力：① 一控多键鼠共享（复用现有捕获/DTLS/事件模型）；② 可选 USB/IP HID 注入后端（Linux 接收端兜底，不依赖合成器 libei 支持）；③ 可选实时画面（GPUI 控制端 + gpui_interop 零拷贝渲染，Linux+Windows 首发）。
-Out of scope：per-client 后端选择（保持本机全局语义）、Windows USB/IP 客户端驱动打包（UI 标记实验性）、macOS 画面、mousehop-proto 输入协议语义改动。
+在 HopDeck（原 Mousehop，中文名「桌联」）v0.17.1（lan-mouse 系 Rust 工作区）上新增三项能力：① 一控多键鼠共享（复用现有捕获/DTLS/事件模型）；② 可选 USB/IP HID 注入后端（Linux 接收端兜底，不依赖合成器 libei 支持）；③ 可选实时画面（GPUI 控制端 + gpui_interop 零拷贝渲染，Linux+Windows 首发）。
+Out of scope：per-client 后端选择（保持本机全局语义）、Windows USB/IP 客户端驱动打包（UI 标记实验性）、macOS 画面、hopdeck-proto 输入协议语义改动（2026-10-26 D51 仅改 8 字节 Hello magic，事件序列化不变）。
 
 ## 里程碑
 
 - [ ] M3a <!-- 任务账本 6/6 已清（会话#17），但验收含真机项未完成——手动保持未勾，真机批次过后再勾 -->
 ## 当前焦点
+- **2026-10-26 会话#22**：**产品彻底改名 HopDeck（桌联）+ 工作区重构已收口并提交（0074922，D51）**——`crates/`（库）+ `apps/`（可执行）新布局；全部 crate/二进制/App ID/配置目录/socket/env/mDNS/服务名/打包资产重命名；`AppIdent/HostKind/RunningApp` 下沉 `hopdeck-input-event` 解除 capture→ipc 依赖；Hello magic 改 `HOPDECK\0`（对 Mousehop 硬断，mDNS 类型也变，双端需同版本）。验收：fmt clean；input-event 10 / proto 22 / ipc 20 / input-capture 70 / input-emulation 10 / video 32+4 / daemon 115 / console 21 全绿；clippy 除 GTK 外全净；**GTK 包在此 agent shell 无 gtk4 pkg-config，未能编译验证**（唯一未验面，需公子 nix 环境或 CI 过一遍默认特性全构建）。P1 池仍只剩 P1.5 断开会话 + 真拒绝 IPC；真机批次仍待公子安排。
 - **2026-10-26 会话#21**：**P1.4 Error toast + RemoteHostState 消费已收口并提交（D50，cc0012c）**——console 20 / ipc 20 / daemon 115 全绿。同轮：origin 已改指公子改名后的仓库 `re2zero/hopdeck.git` 并推送（feat/usbip-emulation，分支首次上远端）。P1 池剩余仅 **P1.5 断开会话 + 真拒绝 IPC**（需 daemon 侧会话击杀语义，量级较大宜新会话专门做）；P2/P3 见 D42；真机批次仍待公子安排。
 - **2026-10-26 会话#20**：**P1.2 + P1.3 两批已收口并提交（D47/D48/D49）**——P1.2 视频共享端 UI（b009f67/b7d508d）、**P1.3 出站回写 peer_fingerprint（7af9eb7，connect.rs record_peer_fingerprint 三挂点，E2E 实证拨号侧 Enumerate 出指纹）**；ipc 20/daemon 115/console 18 全绿。**公子授权（D48）：review + 测试验证通过即直接提交，无需等待拍板**。
 - **会话#19**：定名收口（D45：桌联 + HopDeck）；衔接第一批收口（D46：P0.1 端口落盘 + P0.2 忽略文案 + P1.1 IPC 自动重连，**公子已过目提交** 0513761/da4b978/2800881）；真机批次并行待安排。
@@ -95,7 +96,9 @@ Out of scope：per-client 后端选择（保持本机全局语义）、Windows U
 - 2026-10-26 [D50·P1.4 Error toast + RemoteHostState 消费收口（会话#21），cc0012c] console 接住 daemon 兜底丢弃事件的最小集，daemon 侧零改动：① `FrontendEvent::Error` → journal「服务错误：…」+ `notify_now(Notification::error)`（D18 的 AnyWindowHandle.update 模式，prompt_access_password 同款先例）；② `FrontendEvent::RemoteHostState` → Console 新镜像 `remote_hosts: HashMap<指纹, RemoteHostState>`（与 daemon remote_host_states 同键），状态转换时 journal＋detail.rs 标题行下警示横幅 `render_remote_state_banner`：Locked=Warn journal+toast 打断警示、横幅「输入不会到达对方桌面」；Unavailable=Warn journal「此前锁定状态未知」+横幅（**遵守 ipc 文档铁律：断连事实不得呈现为可安全输入**）；Unlocked=Ok journal、横幅不渲染。daemon Sync 全量回放靠「值相等不 journal」去重；feed 断连随 authorized 一起 clear，重连靠 daemon 回放自愈。指纹→设备名解析 `peer_label`（clients 表回查，无则 short_fingerprint）。③ 验收：console 20 绿（+2 用例：daemon_error_event_journals_message、remote_host_lock_banner_tracks_daemon_transitions 锁定→解锁→断开三态）、ipc 20 / daemon 115 回归绿、fmt/clippy 三包净。**环境事实**：agent shell 无 nix/direnv（.envrc=use flake），gtk4-sys 不可构建 → daemon 侧测试/clippy 必须走 `cargo test -p mousehop --no-default-features --features video`（115 口径即此组合，会话 #20 的口径由来如此）。**UI 测试坑（本次唯一返工）**：元素 `.id()` 后必须 `.test_support()` 才进 test_support 注册表，headless `require` 才找得到（D25② 的隐含前提显式化）。
 
 
+- 2026-10-26 [D51·产品彻底改名 HopDeck + 工作区架构重构（会话#22），0074922] 按公子指令把 D45 定名（桌联 / HopDeck）在全仓落地，并做一次架构重整：① **目录分层**＝`crates/` 放库（hopdeck-input-event/capture/emulation、proto、ipc、video、cli、gtk），`apps/` 放可执行（`hopdeck` daemon+GTK、`hopdeck-console` GPUI）；根 workspace 用 `[workspace.package]` 继承 version/edition/license/repository。② **全量命名空间迁移**＝crate/包名 `hopdeck-*`、二进制 `hopdeck`/`hopdeck-console`、App ID `com.hopdeck.HopDeck`、desktop/icon/metainfo/service/firewall/flatpak/macOS bundle id、`$XDG_CONFIG_HOME/hopdeck/`、`hopdeck.pem`、`hopdeck-*.sock`、`HOPDECK_*` 环境变量、`_hopdeck._udp.local.`、release 资产/AUR pkgname、文档与注释。③ **架构收口**＝`AppIdent/HostKind/RunningApp/host_app_ident` 从 `hopdeck-ipc` 下沉到 `hopdeck-input-event`，`hopdeck-input-capture` 不再依赖 ipc（`cargo tree` 实证只剩 input-event），数据层与控制面解耦。④ **硬断决策**＝`PROTOCOL_MAGIC` 改 `b"HOPDECK\0"`、mDNS 类型改 `_hopdeck._udp.local.`，Mousehop 与 HopDeck 不互通（D45 改名本就要断开；两岸需同版本）。`MACOS_KEEP_AWAKE_EVENT_TAG` 同步改 `0x484F_5044_4543_4B00`（进程内自洽标记）。⑤ **清理**＝删除 `.github/workflows/workflow-drift-check.yml`（它只守护 jondkinney 上游 cohort 的 byte-identical 副本，对本 fork 无意义且改名后必红）；shared workflow 头注释改为「vendored from upstream cohort」。⑥ **验收**＝fmt clean；测试 input-event 10 / proto 22 / ipc 20 / input-capture 70 / input-emulation 10 / video 32+4 / daemon 115（`--no-default-features --features video`）/ console 21 全绿；clippy 除 GTK 包外全净。**未验面**：agent shell 无 nix/direnv、系统无 gtk4/libadwaita pkg-config → `hopdeck-gtk` 无法编译，GTK 代码仅做文本一致性核查（gresource 前缀/模板路径/icon 名/app id 已对齐），须在公子 nix 环境或 CI 跑一次默认特性全构建。**遗留配置项**：GitHub Secret `MOUSEHOP_SIGNING_PASSWORD` 需改名 `HOPDECK_SIGNING_PASSWORD`；cachix cache/AUR 包名改为 hopdeck（分别是 `hopdeck.cachix.org`、`hopdeck`/`hopdeck-bin`/`hopdeck-git`）；旧用户配置目录与证书随改名不迁移 → 需重新配对，发布说明应提示。Flatpak App ID 用 `com.hopdeck.HopDeck`；若上 Flathub 需持有 hopdeck.com 或改 `io.github.re2zero.HopDeck`。
+
 ## 接力索引
 - 会话账本：`.relay/state.json`
-- 交接文档：`.relay/journal/HANDOFF-*.md`（以最新为准）
+- 交接文档：`.relay/journal/HANDOFF-*.md`（以最新为准；最新 = HANDOFF-029，会话#22，0074922）
 - 约定：`.relay/` 纳入版本库（团队接力资产）。
