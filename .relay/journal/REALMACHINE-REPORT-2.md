@@ -43,14 +43,45 @@
 
 结论：p99 93ms、最大 103ms，**低于 150ms 验收线**。口径说明：① 分辨率为 VM 的 1600x1200（1.92MP，1080p 为 2.07MP，约 +8%）；② 端点为「解码完成」，不含 console 上屏绘制（若计入约再加 ≤1 帧 16–33ms，仍有余量）；③ 编码为纯软件 OpenH264。
 
+## 缺陷 4（已修）：反向会话被 Entered 门控误判为僵尸，每 5s 抖动
+
+- **现象**：反向拓扑下输入会话每 5s 重建一次（A 日志 `session 13/14/15… connection closed` + `reverse client 0 keeps a transport … with no live session — resetting so it re-dials`），隧道通道随之反复重连；B 侧每次都要重新收养。
+- **根因**：D31④ 的僵尸检测用 `incoming_session(addr)` 判断会话存活，而它读的 `incoming_conn_info` 只在 `Entered`（指针真正划入）时填充；反向收养的会话在指针划入前是健康的，却被每个 tick 当成僵尸重置。
+- **修复**（`apps/hopdeck/src/service.rs`）：改用 `live_incoming`（P1.2 引入的完整 `Connected` 会话表，插入/替换/断连维护齐全）作为存活源。
+- **真机验证**：修复后 20s 内 `no live session`/断连计数为 0，隧道通道一次建立后不再重连；允许目标取到 marker，拒绝目标仍被 allow 规则拦下。
+
+## M2c 反向隧道真机复验 ✅（含 allow-list）
+
+拓扑：B（本机）为可达侧 exit——`[tunnel] listen = "0.0.0.0:4253"`、`allow = ["127.0.0.1"]`；A（VM）为受限侧——`connect_mode = "reverse"` + 两条 `[[clients.tunnel_forwards]]`（18080→127.0.0.1:8099 允许；18081→192.168.101.16:8099 预期被拒）。B 的 loopback 上跑 `python3 -m http.server 8099` 提供 marker。
+
+| 项 | 结论 | 证据 |
+|---|---|---|
+| 隧道通道建立 | ✅ | B `tunnel channel established with 192.168.101.74:…`；A `tunnel channel to 192.168.101.16:4253 established`（一次建立，不再重连） |
+| 允许目标转发 | ✅ | VM 上 `curl http://127.0.0.1:18080/marker.txt` → `hopdeck-m2c-marker-1793025718`（B 的 loopback 服务） |
+| 默认拒绝 + allow-list | ✅ | `curl http://127.0.0.1:18081/…` 返回 000；日志 `target denied by exit allow rules` |
+| 反向会话稳定性 | ✅（修复后） | 见缺陷 4；20s 零重置 |
+
+**拓扑注意**：两侧互标 `reverse` 且双向可达时会互拨，各自把对端拨入的连接当成「自己拨号的回声」（日志 `echoes client 0's own reverse dial`），出现约 5s 的收养/重置循环。按 D35③ 的做法，在 exit 侧把对 A 的拨号端口指向不可达端口（本次 9999）即可抑制自拨回声，同时保留 reverse 标记供收养。
+
+## 输入注入真机复验 ✅（指针；X11 后端）
+
+- VM 已切回 X11（lightdm 自动登录 uos，display **:1**，1920x1080；原 treeland 会话的 bind mount 已卸载）。
+- **X11 采集后端尚未实现**（运行时报 `X11 input capture is not yet implemented :(`，README 也标注未勾选），因此采集侧用 dummy 源（其合成运动正是 D31 用过的端到端驱动方式），注入侧用真实 **X11 emulation** 后端。
+- 结果：VM 上 `DISPLAY=:1 xdotool getmouselocation` 连续采样 `800,600 → 656,502 → 807,563 → 658,596 → 454,450 → 435,634 → 671,488`——指针被远端 dummy 流真实驱动；B 侧日志 `[wp-begin] pos=left` + `adopting inbound transport`；A 侧 `EmulationStatus=Enabled`、`EmulationBackend=X11`、`alive=true`。
+- 未覆盖：键盘注入（dummy 源只发指针运动）、USB-IP 后端（本轮未重编 usbip 用户态工具；X11 注入已足够证明会话→注入链路）。
+
 ## 其他观察（未改，记录备查）
 
 1. **daemon 不会在无输入事件时自动重连**：B 侧 daemon 在 A 重启后停在 `alive=false`（重连是输入事件驱动的；dummy capture 无事件，故本报告用重启 B 的方式建新会话）。真实桌面有指针/键盘事件，预期可触发；是否要加独立重连定时器留待拍板。
 2. **portal 帧无内嵌计数器**：接收端 `counter=65535` 是 `read_pattern_index` 对任意桌面像素的退化读数，仅日志观感问题（feed 的 index 同理）。
 3. **headless 会话下 arboard 初始化阻塞**：`Clipboard::new()` 在无 X/Wayland 连接的会话里会同步等 X11 超时，拖住单线程 runtime；测试脚本已用 unset `DISPLAY`/`WAYLAND_DISPLAY` 规避，产品侧在纯 headless 服务场景值得关注。
 4. **DDE portal 的 XWaylandName 卡死是 VM 缺陷**，与 HopDeck 代码无关；真机桌面（有完整 XWayland）上的 picker 交互仍待下一轮真机。
+5. **X11 采集后端缺口**：`--capture-backend x11` 会启动失败（明确报未实现），X11 桌面目前只能做被控端注入；README 的未勾选项准确，无需改文档。
 
 ## 里程碑状态影响
 
 - **M3a 真机批次**：portal 采集真实链路 ✅（wlr 替代 DDE，含 RestoreToken 发放）；LAN 端到端延迟 ✅（p99 93ms）；**交互式 picker 弹框仍未验**（wlr 自动选屏 + DDE portal 在 VM 不可用），保持注记。
-- **M2c 反向隧道真机复验 / 输入注入复验**：未包含在本报告中，后续同 VM 继续。
+- **M2c 反向隧道真机复验**：✅（含 allow-list 拒绝与缺陷 4 修复）。
+- **输入注入真机复验**：✅ 指针注入（X11 后端）；键盘/USB-IP 不在本轮范围。
+- VM 现状：X11 + 自动登录 uos（display :1），测试 daemon/HTTP 服务已停止，treeland 会话目录 bind mount 已卸载。
+
