@@ -1520,11 +1520,15 @@ impl Service {
             // adopted session looks alive forever — the ping below is a
             // plain UDP write on the dead DTLS conn and succeeds silently,
             // so the send path never errors and nothing else re-dials.
-            // Detect the zombie (active address installed, no live inbound
-            // session for it) and reset the handle so the ping re-dials
-            // instead of feeding a corpse.
+            // Detect the zombie (active address installed, no live session
+            // for it) and reset the handle so the ping re-dials instead of
+            // feeding a corpse. Liveness comes from `live_incoming`
+            // (`Connected`), not `incoming_conn_info` (`Entered`): an
+            // adopted reverse session is alive long before the pointer
+            // crosses, and the Entered-gated map would reset it every
+            // tick — observed on a real device as a 5s session flap.
             if let Some(addr) = self.client_manager.active_addr(handle) {
-                if self.incoming_session(addr).is_none() {
+                if !self.live_incoming.contains_key(&addr) {
                     log::warn!(
                         "reverse client {handle} keeps a transport at {addr} \
                          with no live session — resetting so it re-dials"
