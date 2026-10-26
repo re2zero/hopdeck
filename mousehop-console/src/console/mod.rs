@@ -47,7 +47,7 @@ use self::layout::DeviceDrag;
 use self::logbar::{LogLevel, LogSink};
 use mousehop_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectMode, CrossingModifier, DEFAULT_PORT,
-    FrontendEvent, FrontendRequest, IncomingPeerConfig, Position, Status,
+    FrontendEvent, FrontendRequest, IncomingPeerConfig, Position, RemoteHostState, Status,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -86,6 +86,11 @@ pub struct Console {
     edit: Option<EditDraft>,
     /// Mirror of the daemon's `authorized_fingerprints`.
     authorized: HashMap<String, IncomingPeerConfig>,
+    /// Mirror of the daemon's lock-recovery map (`RemoteHostState`
+    /// events, keyed by peer certificate fingerprint): whether a
+    /// controlled peer's desktop currently accepts input. The daemon
+    /// replays the whole map on `Sync`, so reconnects self-heal.
+    remote_hosts: HashMap<String, RemoteHostState>,
     /// Whether the settings overlay (design D15) is open.
     settings_open: bool,
     /// The open settings page (design v2.2's five-entry nav).
@@ -288,6 +293,7 @@ impl Console {
             awaiting_auth: HashMap::new(),
             edit: None,
             authorized: HashMap::new(),
+            remote_hosts: HashMap::new(),
             settings_open: false,
             settings_tab: self::settings::SettingsTab::General,
             self_fingerprint: None,
@@ -352,6 +358,7 @@ impl Console {
                 self.pending_connect = None;
                 self.retrying = None;
                 self.authorized.clear();
+                self.remote_hosts.clear();
                 self.awaiting_auth.clear();
                 self.settings_open = false;
                 self.self_fingerprint = None;
@@ -499,6 +506,44 @@ impl Console {
                     );
                 }
                 self.video_share_enabled = enabled;
+            }
+            FrontendEvent::Error(message) => {
+                self.journal(LogLevel::Error, format!("服务错误：{message}"));
+                self.notify_now(Notification::error(message), cx);
+            }
+            FrontendEvent::RemoteHostState {
+                fingerprint, state, ..
+            } => {
+                // The daemon only pushes transitions, but replays the
+                // whole map on `Sync` — dedupe so reconnects don't
+                // re-journal stale states.
+                if self.remote_hosts.get(&fingerprint) != Some(&state) {
+                    let name = self.peer_label(&fingerprint);
+                    match state {
+                        RemoteHostState::Locked => {
+                            self.journal(
+                                LogLevel::Warn,
+                                format!("{name} 屏幕已锁定：输入不会到达对方桌面"),
+                            );
+                            self.notify_now(
+                                Notification::warning(format!(
+                                    "「{name}」屏幕已锁定：解锁前请勿输入密码"
+                                )),
+                                cx,
+                            );
+                        }
+                        RemoteHostState::Unlocked => {
+                            self.journal(LogLevel::Ok, format!("{name} 已解锁，可安全输入"));
+                        }
+                        RemoteHostState::Unavailable => {
+                            self.journal(
+                                LogLevel::Warn,
+                                format!("{name} 连接已断开：此前锁定状态未知"),
+                            );
+                        }
+                    }
+                }
+                self.remote_hosts.insert(fingerprint, state);
             }
             _ => {}
         }
@@ -654,6 +699,17 @@ impl Console {
 
     fn selected_entry(&self) -> Option<&DeviceEntry> {
         self.selected.and_then(|handle| self.entry(handle))
+    }
+
+    /// Human label for a peer fingerprint: the device hostname when a
+    /// client entry carries it, else the short fingerprint (the peer
+    /// may have connected without ever being configured here).
+    fn peer_label(&self, fingerprint: &str) -> String {
+        self.clients
+            .iter()
+            .find(|entry| entry.state.peer_fingerprint.as_deref() == Some(fingerprint))
+            .map(|entry| entry.name().to_string())
+            .unwrap_or_else(|| short_fingerprint(fingerprint).to_string())
     }
 
     fn sort_clients(&mut self) {

@@ -19,6 +19,7 @@ use gpui_kit::{
 };
 use mousehop_ipc::{
     ClientHandle, ConnectMode, CrossingModifier, FrontendRequest, IncomingPeerConfig, Position,
+    RemoteHostState,
 };
 use std::net::IpAddr;
 
@@ -108,6 +109,7 @@ impl Console {
                             .child(self.render_cloud_badge(cx)),
                     ),
             )
+            .children(self.render_remote_state_banner(entry, cx))
             .child(self.render_kv_section("概览", cx))
             .child(self.render_overview_grid(entry, cx))
             .child(self.render_kv_section("安全", cx))
@@ -134,6 +136,61 @@ impl Console {
             .text_color(cx.theme().muted_foreground)
             .child(Icon::new(IconName::Cloud).xsmall())
             .child("云")
+    }
+
+    /// Lock-recovery guidance (P1.4): when the controlled peer's
+    /// desktop is locked — or its session dropped while it was — show
+    /// a warning banner instead of implying keystrokes reach the
+    /// desktop. `Unlocked` renders nothing: it is the normal case.
+    fn render_remote_state_banner(
+        &self,
+        entry: &DeviceEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let fingerprint = entry.state.peer_fingerprint.as_deref()?;
+        let state = *self.remote_hosts.get(fingerprint)?;
+        let (title, body) = match state {
+            RemoteHostState::Locked => (
+                "远端屏幕已锁定",
+                "键盘输入不会到达对方桌面，解锁前请勿输入密码或其他敏感内容。",
+            ),
+            // A drop mid-lock is a local connection fact, not peer
+            // confirmation — present it as unknown, never as safe.
+            RemoteHostState::Unavailable => (
+                "远端连接已断开",
+                "此前的锁定状态已过期；重连前请勿假定可以安全输入。",
+            ),
+            RemoteHostState::Unlocked => return None,
+        };
+        let theme = cx.theme();
+        Some(
+            v_flex()
+                .id("remote-state-banner")
+                .test_support()
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.warning.opacity(0.5))
+                .overflow_hidden()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .bg(theme.warning.opacity(0.12))
+                        .text_color(theme.warning)
+                        .child(Icon::new(IconName::ShieldAlert).small())
+                        .child(div().text_sm().child(title)),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(body),
+                ),
+        )
     }
 
     /// Overview strip (design v2.2's `.mh-kv`): a bordered card cut

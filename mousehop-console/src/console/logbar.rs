@@ -156,6 +156,14 @@ impl LogSink {
             .cloned()
             .collect()
     }
+
+    /// Journal assertion hook for the headless UI tests.
+    #[cfg(test)]
+    pub(crate) fn any_message_contains(&self, needle: &str) -> bool {
+        self.snapshot()
+            .iter()
+            .any(|entry| entry.message.contains(needle))
+    }
 }
 
 /// Local wall clock `HH:MM:SS` (the design mock's `toTimeString`

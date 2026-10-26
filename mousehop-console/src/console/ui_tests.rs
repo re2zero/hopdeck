@@ -23,7 +23,7 @@ use gpui_kit::{
 use super::Console;
 use super::logbar::LogSink;
 use crate::ipc::FeedEvent;
-use mousehop_ipc::{ClientConfig, ClientState, FrontendEvent, IncomingPeerConfig};
+use mousehop_ipc::{ClientConfig, ClientState, FrontendEvent, IncomingPeerConfig, RemoteHostState};
 
 /// Invalidate and complete a frame so fresh state and observations
 /// land in the last-frame registry the queries read.
@@ -240,6 +240,95 @@ fn settings_panes_render_peer_card_controls(cx: &mut TestAppContext) {
                 assert!(snapshot.visible(), "{id:?} must be visible");
             }
         }
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn daemon_error_event_journals_message(cx: &mut TestAppContext) {
+    // P1.4: `Error` used to vanish into the console's catch-all arm;
+    // it must land in the journal (the toast needs a real window).
+    let (window, content) = open_console(cx);
+    cx.update_window(window, |_, window, cx| {
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::Error("UDP 端口被占用".to_string()))),
+                cx,
+            );
+            assert!(
+                console
+                    .log_sink
+                    .any_message_contains("服务错误：UDP 端口被占用"),
+                "daemon error must reach the journal"
+            );
+        });
+        frame(window, cx);
+    })
+    .unwrap();
+}
+
+#[gpui::test]
+fn remote_host_lock_banner_tracks_daemon_transitions(cx: &mut TestAppContext) {
+    // P1.4: the peer-confirmed lock-recovery state renders as a detail
+    // banner while Locked/Unavailable and clears once peer-confirmed
+    // Unlocked — never presenting a drop as "safe to type".
+    let (window, content) = open_console(cx);
+    let fingerprint = "ab12".repeat(8);
+    let locked = || FrontendEvent::RemoteHostState {
+        fingerprint: fingerprint.clone(),
+        addr: "192.0.2.5:4252".parse().expect("address"),
+        state: RemoteHostState::Locked,
+    };
+    cx.update_window(window, |_, window, cx| {
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::Created(
+                    7,
+                    ClientConfig {
+                        hostname: Some("alpha-book".to_string()),
+                        ..Default::default()
+                    },
+                    ClientState {
+                        peer_fingerprint: Some(fingerprint.clone()),
+                        ..Default::default()
+                    },
+                ))),
+                cx,
+            );
+            console.on_feed(FeedEvent::Daemon(Box::new(locked())), cx);
+        });
+        frame(window, cx);
+        click(window, ("device-row", 7_u64).into(), cx);
+        require(window, "remote-state-banner".into());
+
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::RemoteHostState {
+                    fingerprint: fingerprint.clone(),
+                    addr: "192.0.2.5:4252".parse().expect("address"),
+                    state: RemoteHostState::Unlocked,
+                })),
+                cx,
+            );
+        });
+        frame(window, cx);
+        assert!(
+            snapshot(window, "remote-state-banner".into()).is_none(),
+            "unlocked peer must not show the banner"
+        );
+
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::RemoteHostState {
+                    fingerprint: fingerprint.clone(),
+                    addr: "192.0.2.5:4252".parse().expect("address"),
+                    state: RemoteHostState::Unavailable,
+                })),
+                cx,
+            );
+        });
+        frame(window, cx);
+        require(window, "remote-state-banner".into());
     })
     .unwrap();
 }
