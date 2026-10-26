@@ -953,6 +953,16 @@ impl Config {
             .authorized_fingerprints = Some(fingerprints);
     }
 
+    /// set the daemon listen port (frontend-initiated `ChangePort`). The
+    /// running listener is rebuilt by the emulation task; this only makes
+    /// the choice survive the next start.
+    pub fn set_port(&mut self, port: u16) {
+        if self.config_toml.is_none() {
+            self.config_toml = Some(Default::default());
+        }
+        self.config_toml.as_mut().expect("config").port = Some(port);
+    }
+
     /// Snapshot of the persisted per-OS suppression lists.
     pub fn clipboard_suppression(&self) -> ClipboardSuppression {
         self.config_toml

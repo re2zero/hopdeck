@@ -979,8 +979,16 @@ impl Service {
             }
             EmulationEvent::PortChanged(port) => match port {
                 Ok(port) => {
+                    let changed = self.port != port;
                     self.port = port;
                     self.discovery.set_port(port);
+                    if changed {
+                        // The listener is rebuilt live by the emulation
+                        // task; the config is what the next start reads,
+                        // so an explicit port change must land there.
+                        self.config.set_port(port);
+                        self.save_config().await;
+                    }
                     self.notify_frontend(FrontendEvent::PortChanged(port, None));
                 }
                 Err(e) => self
