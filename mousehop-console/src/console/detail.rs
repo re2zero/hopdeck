@@ -514,7 +514,7 @@ impl Console {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("auth-decline-{handle}")))
-                                    .label("拒绝")
+                                    .label("忽略")
                                     .ghost()
                                     .danger()
                                     .small()
@@ -524,7 +524,7 @@ impl Console {
                                             entity.update(cx, |this, _| {
                                                 this.journal(
                                                     super::logbar::LogLevel::Info,
-                                                    format!("已拒绝「{decline_name}」的连接请求"),
+                                                    format!("已忽略「{decline_name}」的连接请求（未通知服务，对方重试超时后自动停止）"),
                                                 );
                                             });
                                         },

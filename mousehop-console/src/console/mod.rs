@@ -541,7 +541,7 @@ impl Console {
                     .child(Input::new(&input).small())
                     .confirm()
                     .ok_text("允许连接")
-                    .cancel_text("拒绝")
+                    .cancel_text("忽略")
                     .on_ok(move |_, _, cx| {
                         let desc = input.read(cx).value().trim().to_string();
                         let desc = if desc.is_empty() {
