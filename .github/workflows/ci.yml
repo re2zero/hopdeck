@@ -47,11 +47,10 @@ jobs:
 
       - name: Scope rust-cache to the runner image
         # ImageVersion changes whenever GitHub refreshes the runner
-        # image — which is also when preinstalled / Homebrew libs
-        # (notably glib + gtk4) move. Folding it into the cache key
-        # stops a cached build script's baked-in `-L /opt/homebrew/
-        # Cellar/glib/<ver>/lib` from outliving the Cellar dir it
-        # points at (`ld: library 'gio-2.0' not found`).
+        # image — which is also when preinstalled / Homebrew libs move.
+        # Folding it into the cache key stops a cached build script's
+        # baked-in `-L /opt/homebrew/Cellar/<lib>/<ver>/lib` from
+        # outliving the Cellar dir it points at.
         shell: bash
         run: echo "CACHE_IMAGE=${ImageOS:-}-${ImageVersion:-}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
@@ -62,48 +61,21 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install libx11-dev libxtst-dev libadwaita-1-dev libgtk-4-dev libdbus-1-dev
+          sudo apt-get install libx11-dev libxtst-dev libdbus-1-dev
+          sudo apt-get install libwayland-dev libxkbcommon-dev
 
       - name: Install macOS deps
         if: runner.os == 'macOS'
-        run: brew install gtk4 libadwaita imagemagick
-
-      # Windows GTK stack lives in C:\gtk-build, populated by gvsbuild
-      # and cached so we only pay the build cost on cold cache.
-      - name: Windows - create gtk dir
-        if: runner.os == 'Windows'
-        run: mkdir C:\gtk-build\gtk\x64\release
-      - name: Windows - cache gtk
-        if: runner.os == 'Windows'
-        uses: actions/cache@v4
-        id: cache
-        with:
-          path: c:/gtk-build/gtk/x64/release/**
-          key: gtk-windows-build
-          restore-keys: gtk-windows-build
-      - name: Windows - update PATH
-        if: runner.os == 'Windows'
-        run: |
-          echo "PKG_CONFIG=C:\gtk-build\gtk\x64\release\bin\pkgconf.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "C:\pkg-config-lite-0.28-1\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          echo "C:\gtk-build\gtk\x64\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-      - name: Windows - build gtk on cache miss
-        if: runner.os == 'Windows' && steps.cache.outputs.cache-hit != 'true'
-        run: |
-          py -m venv .venv
-          .venv\Scripts\activate.ps1
-          # gvsbuild 2026.8.0 installs cargo-c outside the PATH used by
-          # librsvg's Meson build. Pin the merged upstream fix until it is
-          # included in a release: https://github.com/wingtk/gvsbuild/pull/1803
-          py -m pip install git+https://github.com/wingtk/gvsbuild.git@6e67071890322a58d4d14ccd9fc4a61cc8494006
-          # windows-latest is now the VS2026 image; gvsbuild defaults to
-          # vs2022 and can't find it ("Unable to find applicable Visual
-          # Studio"), so target VS2026 explicitly. GTK4 pulls in librsvg,
-          # whose build exercises the pinned cargo-c fix above.
-          gvsbuild build --vs-ver vs2026 --msys-dir=C:\msys64 gtk4 libadwaita
+        run: brew install imagemagick
 
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # Two invocations: gpui's ashpd `async-io` and the daemon's
+        # ashpd `tokio` abort when feature-unified in one build graph.
+        run: |
+          cargo clippy --workspace --exclude hopdeck-console --all-targets --all-features -- -D warnings
+          cargo clippy -p hopdeck-console --all-targets --all-features -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace --all-features
+        run: |
+          cargo test --workspace --exclude hopdeck-console --all-features
+          cargo test -p hopdeck-console --all-features

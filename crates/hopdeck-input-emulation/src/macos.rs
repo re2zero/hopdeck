@@ -417,8 +417,8 @@ mod permission_tests {
 }
 
 fn request_accessibility_permission() -> bool {
-    // Silent check. The GUI owns the one-time user-visible prompt at
-    // startup (see hopdeck_gtk::macos_privacy).
+    // Silent check: permission is granted in System Settings, and the
+    // daemon's TCC watcher reacts to later revocations.
     unsafe { AXIsProcessTrusted() }
 }
 

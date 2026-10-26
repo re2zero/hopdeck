@@ -27,12 +27,12 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
 
 ***blazingly fast™*** because it's written in rust.
 
-- Two frontends: a GTK4 / Libadwaita settings app (bundled into `hopdeck`) and a GPUI control console (`hopdeck-console`).
+- One GPUI frontend: the `hopdeck-console` control console, launched automatically when `hopdeck` runs without arguments. The `hopdeck` binary also provides the headless daemon and CLI.
 
 <p align="center">
-    <img alt="The HopDeck main window: General settings, Outgoing Auto-Release threshold, paired peers, mDNS discovery, and Clipboard Privacy"
-         src="screenshots/hopdeck-prefs.png"
-         width="420">
+    <img alt="The HopDeck control console: peer detail, sharing options, and the screen layout canvas"
+         src="screenshots/hopdeck-console.png"
+         width="720">
 </p>
 
 
@@ -90,7 +90,7 @@ It can be used as a remote control for any device supported by HopDeck.
 - Download the `.dmg` for your Mac (Intel or Apple Silicon) from the releases page
 - Open the `.dmg` and drag `HopDeck.app` into `Applications`
 - Launch the app — release builds are signed with a Developer ID and notarized by Apple, so it opens with no Gatekeeper prompt
-- Use the menu bar item to open the settings window or quit HopDeck. Bundled macOS builds run as a menu bar app and do not keep a Dock icon visible.
+- The control console opens on launch; closing its window stops HopDeck, including input sharing
 - Grant accessibility permissions in System Settings
 - While this Mac is controlling a peer, HopDeck automatically keeps macOS from starting the idle screen saver or turning off the display. The keep-awake assertion ends as soon as the cursor returns to this Mac.
 - If the Mac nevertheless locks after a controlled peer sleeps or disconnects, HopDeck releases capture and shows confirmed recovery status on that peer. Use the keyboard physically attached to the Mac: Shift is a harmless wake key, then wait for the status; type the Mac password only while the peer still reports **locked**. The dialog has no password field, and HopDeck never reads or transports the password. If status becomes **unavailable**, switch the monitor to the Mac or use Touch ID, Apple Watch, or your hardware input switch instead.
@@ -100,20 +100,11 @@ It can be used as a remote control for any device supported by HopDeck.
 <details>
     <summary>Windows</summary>
 
-- Download `hopdeck-windows-x86_64.zip` from the releases page and extract it somewhere permanent — the GTK DLLs next to `hopdeck.exe` are required, so keep the folder intact
-- Run `hopdeck.exe`. No console window appears, and none has to stay open
+- Download `hopdeck-windows-x86_64.zip` from the releases page and extract it somewhere permanent — keep `hopdeck.exe` and `hopdeck-console.exe` together in the same folder
+- Run `hopdeck.exe`. It starts the daemon and opens the control console; no console window appears
 
-**Notification area.** Closing the settings window does not quit HopDeck — it
-hides to the notification area (the "system tray") and keeps sharing input.
-
-- Left-click the tray icon to show or hide the settings window
-- Right-click it for **Open HopDeck** / **Quit HopDeck**
-- Quitting from that menu is the only thing that stops input sharing
-
-Windows 11 files new tray icons into the overflow flyout (the `^` chevron) by
-default. Drag the HopDeck icon out of the flyout and onto the taskbar to keep
-it visible, or find it under Settings → Personalization → Taskbar → Other system
-tray icons.
+**Closing the window** stops HopDeck, including input sharing. To keep sharing
+while the window is out of the way, minimize it instead.
 
 **Start with Windows.** Press <kbd>Win</kbd>+<kbd>R</kbd>, run `shell:startup`,
 and drop a shortcut to `hopdeck.exe` into the folder that opens.
@@ -138,21 +129,21 @@ Crashes are recorded either way, at
 First make sure to [install the necessary dependencies](#installing-dependencies-for-development--compiling-from-source).
 
 Precompiled release binaries for Windows, MacOS and Linux are available in the [releases section](https://github.com/re2zero/hopdeck/releases).
-For Windows, the depenedencies are included in the .zip file, for other operating systems see [Installing Dependencies](#installing-dependencies-for-development--compiling-from-source).
+For Windows, both executables are included in the .zip file; for other operating systems see [Installing Dependencies](#installing-dependencies-for-development--compiling-from-source).
 
 Alternatively, the `hopdeck` binary can be compiled from source (see below).
 
 ### Installing desktop file, app icon and firewall rules (optional)
 ```sh
-# install hopdeck (replace path/to/ with the correct path)
-sudo cp path/to/hopdeck /usr/local/bin/
+# install the daemon/CLI binary and the console frontend
+sudo cp path/to/hopdeck path/to/hopdeck-console /usr/local/bin/
 
 # install app icon
 sudo mkdir -p /usr/local/share/icons/hicolor/scalable/apps
-sudo cp crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg /usr/local/share/icons/hicolor/scalable/apps
+sudo cp apps/hopdeck/assets/com.hopdeck.HopDeck.svg /usr/local/share/icons/hicolor/scalable/apps
 
 # update icon cache
-gtk-update-icon-cache /usr/local/share/icons/hicolor/
+update-icon-caches /usr/local/share/icons/hicolor/
 
 # install desktop entry
 sudo mkdir -p /usr/local/share/applications
@@ -168,11 +159,12 @@ can be easily compiled via cargo or nix:
 
 ### Compiling and installing manually:
 ```sh
-# compile in release mode
-cargo build --release -p hopdeck
+# compile in release mode (two invocations: see the ashpd note below)
+cargo build --release
+cargo build --release -p hopdeck-console
 
-# install hopdeck
-sudo cp target/release/hopdeck /usr/local/bin/
+# install hopdeck and its console frontend
+sudo cp target/release/hopdeck target/release/hopdeck-console /usr/local/bin/
 ```
 
 ### Compiling and installing via cargo:
@@ -183,7 +175,7 @@ cargo install --git https://github.com/re2zero/hopdeck --package hopdeck
 
 ### Compiling and installing via nix:
 ```sh
-# you can find the executable in result/bin/hopdeck
+# you can find the executables in result/bin/hopdeck and result/bin/hopdeck-console
 nix-build
 ```
 ### Conditional compilation
@@ -213,7 +205,7 @@ executables (`apps/`):
 
 ```
 apps/
-  hopdeck/            # `hopdeck` binary: daemon + GTK settings app
+  hopdeck/            # `hopdeck` binary: daemon + CLI + launcher for the console
   hopdeck-console/    # `hopdeck-console` binary: GPUI control console
 crates/
   hopdeck-input-event/     # shared input + app-identity types
@@ -223,7 +215,6 @@ crates/
   hopdeck-ipc/             # daemon <-> frontend IPC (JSON over a Unix socket)
   hopdeck-video/           # screen capture + H.264 codec + transport
   hopdeck-cli/             # CLI frontend library
-  hopdeck-gtk/             # GTK4 / Libadwaita frontend library
 ```
 
 `hopdeck-input-capture` depends only on `hopdeck-input-event`, never on
@@ -246,7 +237,7 @@ chmod +x .githooks/pre-commit
 git config core.hooksPath .githooks
 ```
 
-The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified), clippy and tests. Clippy and tests run twice — once for the daemon workspace (`--exclude hopdeck-console`) and once for the console — because gpui's ashpd `async-io` and the daemon's ashpd `tokio` features abort when unified in one build graph.
 
 ### Dependencies & Compiling from Source
 <details>
@@ -254,14 +245,13 @@ The `pre-commit` script runs `cargo fmt --all` (and fails if files were modified
 
 ```sh
 # Install dependencies
-brew install libadwaita pkg-config imagemagick
+brew install pkg-config imagemagick librsvg
 cargo install cargo-bundle
 # Create the macOS icon file
 scripts/makeicns.sh
-# Create the .app bundle (cargo-bundle resolves resources from CWD)
+# Create the .app bundle and add the console alongside `hopdeck`
 (cd apps/hopdeck && cargo bundle)
-# Copy all dynamic libraries into the bundle, and update the bundle to find them there
-scripts/copy-macos-dylib.sh
+cp target/release/hopdeck-console target/release/bundle/osx/HopDeck.app/Contents/MacOS/
 ```
 </details>
 
@@ -269,7 +259,7 @@ scripts/copy-macos-dylib.sh
     <summary>Ubuntu and derivatives</summary>
 
 ```sh
-sudo apt install libadwaita-1-dev libgtk-4-dev libx11-dev libxtst-dev
+sudo apt install libx11-dev libxtst-dev libdbus-1-dev libwayland-dev libxkbcommon-dev
 ```
 </details>
 
@@ -277,7 +267,7 @@ sudo apt install libadwaita-1-dev libgtk-4-dev libx11-dev libxtst-dev
     <summary>Arch and derivatives</summary>
 
 ```sh
-sudo pacman -S libadwaita gtk libx11 libxtst
+sudo pacman -S libx11 libxtst dbus wayland libxkbcommon
 ```
 </details>
 
@@ -285,7 +275,7 @@ sudo pacman -S libadwaita gtk libx11 libxtst
     <summary>Fedora and derivatives</summary>
 
 ```sh
-sudo dnf install libadwaita-devel libXtst-devel libX11-devel
+sudo dnf install libX11-devel libXtst-devel dbus-devel wayland-devel libxkbcommon-devel
 ```
 </details>
 <details>
@@ -307,58 +297,21 @@ nix develop
     <summary>Windows</summary>
 
 - First install [Rust](https://www.rust-lang.org/tools/install).
-
-- Then follow the instructions at [gtk-rs.org](https://gtk-rs.org/gtk4-rs/stable/latest/book/installation_windows.html)
-
-*TLDR:*
-
-Build gtk from source
-
-- The following commands should be run in an **admin power shell** instance:
-```sh
-# install chocolatey
-Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-
-# install gvsbuild dependencies
-choco install python git msys2 visualstudio2022-workload-vctools
-```
-
-- The following commands should be run in a **regular power shell** instance:
-
-```sh
-# install gvsbuild with python
-python -m pip install --user pipx
-python -m pipx ensurepath
-```
-
-- Relaunch your powershell instance so the changes in the environment are reflected.
-```sh
-pipx install gvsbuild
-
-# build gtk + libadwaita
-gvsbuild build gtk4 libadwaita librsvg adwaita-icon-theme
-```
-
-- **Make sure to add the directory** `C:\gtk-build\gtk\x64\release\bin`
-[**to the `PATH` environment variable**]((https://learn.microsoft.com/en-us/previous-versions/office/developer/sharepoint-2010/ee537574(v=office.14))). Otherwise the project will fail to build.
-
-To avoid building GTK from source, it is possible to disable
-the gtk frontend (see conditional compilation).
+- Build with `cargo build --release` and `cargo build --release -p hopdeck-console`. GPUI links only system libraries, so no
+  GTK/MSYS toolchain setup is required.
 </details>
 
 ## Usage
 <details>
-    <summary>Gtk Frontend</summary>
+    <summary>HopDeck Console</summary>
 
-By default the gtk frontend will open when running `hopdeck`.
+Running `hopdeck` without arguments starts the daemon and opens the GPUI control
+console (`hopdeck-console`, which must sit next to the `hopdeck` binary).
 
-To connect a device you want to control, simply click the `Add` button and enter the hostname
-of the device.
-
-On the *remote* device, authorize your *local* device for incoming traffic using the `Authorize` button
-under the "Incoming Connections" section.
-The fingerprint for authorization can be found under the general section of your *local* device.
-It is of the form "aa:bb:cc:..."
+Peers are discovered over mDNS, or added by hostname/IP in the console. On the
+first connection both machines show the same fingerprint; accepting it trusts
+the device and lets it send input here. The local fingerprint is shown in the
+console's General settings.
 
 Authorized devices can be persisted using the configuration file (see [Configuration](#configuration)).
 
@@ -605,7 +558,7 @@ In addition to the user list, macOS clipboards stamped with the [`org.nspasteboa
 The wire frame carries the originator's TLS certificate fingerprint. The Service tracks `(originator_fp, content_hash)` for 1 second to prevent rebroadcast cycles in N-peer topologies (A→B→C won't echo back to A).
 
 ## Roadmap
-- [x] Graphical frontend (gtk + libadwaita)
+- [x] Graphical frontend (GPUI control console)
 - [x] respect xdg-config-home for config file location.
 - [x] IP Address switching
 - [x] Liveness tracking Automatically ungrab mouse when client unreachable

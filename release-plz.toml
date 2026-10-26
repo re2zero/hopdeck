@@ -26,7 +26,6 @@ changelog_update = true
 # CHANGELOG so a fix touching only a sibling still shows up here.
 changelog_include = [
     "hopdeck-cli",
-    "hopdeck-gtk",
     "hopdeck-ipc",
     "hopdeck-proto",
     "hopdeck-input-event",

@@ -25,9 +25,8 @@
 #                                  appleid.apple.com, used by notarytool
 #
 # Local development: leave MACOS_CERTIFICATE_P12_BASE64 unset and this
-# script no-ops with a notice — the ad-hoc signature from
-# copy-macos-dylib.sh stays in place so the build still launches after
-# the right-click → Open dance.
+# script no-ops with a notice — cargo-bundle's ad-hoc signature stays in
+# place so the build still launches after the right-click → Open dance.
 
 set -euo pipefail
 
@@ -140,11 +139,9 @@ echo "==> Signing identity: $IDENTITY"
 # instead of two; the dragged-out app still clears Gatekeeper via
 # Apple's online ticket lookup on first launch.
 if [[ "$KIND" == "app" ]]; then
-    # Inside-out: nested executables/frameworks/dylibs first, then the
-    # outer wrapper. HopDeck's bundle carries the GTK / libadwaita
-    # dylibs under Contents/Frameworks (copied in by
-    # copy-macos-dylib.sh), so this loop signs each of them before the
-    # wrapper seals the bundle.
+    # Inside-out: any nested helpers first, then each executable under
+    # Contents/MacOS (hopdeck plus the hopdeck-console frontend), then
+    # the outer wrapper.
     if [[ -d "$TARGET/Contents/Frameworks" || -d "$TARGET/Contents/PlugIns" || -d "$TARGET/Contents/Helpers" ]]; then
         while IFS= read -r -d '' nested; do
             echo "==> Signing nested: $nested"
@@ -166,6 +163,16 @@ if [[ "$KIND" == "app" ]]; then
         --keychain "$KEYCHAIN_PATH" \
         --sign "$IDENTITY" \
         "$TARGET/Contents/MacOS/hopdeck"
+
+    # The GPUI console is launched by `hopdeck` as a sibling binary;
+    # it needs the same hardened-runtime signature to pass notarization.
+    if [[ -f "$TARGET/Contents/MacOS/hopdeck-console" ]]; then
+        echo "==> Signing console executable"
+        codesign --force --options runtime --timestamp \
+            --keychain "$KEYCHAIN_PATH" \
+            --sign "$IDENTITY" \
+            "$TARGET/Contents/MacOS/hopdeck-console"
+    fi
 
     echo "==> Signing app bundle"
     codesign --force --options runtime --timestamp \

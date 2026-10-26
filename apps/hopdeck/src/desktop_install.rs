@@ -19,10 +19,8 @@ use std::path::PathBuf;
 
 /// App icon and desktop entry, embedded into the binary so the install
 /// works from a `cargo install`ed binary with no repo checkout present.
-/// `assets/com.hopdeck.HopDeck.svg` mirrors
-/// `crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg` (the icon used
-/// at runtime by the GTK frontend); keep both in sync if the icon
-/// changes.
+/// `assets/com.hopdeck.HopDeck.svg` is the single icon source; packaging
+/// (Flatpak, Nix, release tarballs) installs the same file.
 const ICON_SVG: &[u8] = include_bytes!("../assets/com.hopdeck.HopDeck.svg");
 const DESKTOP_ENTRY: &str = include_str!("../com.hopdeck.HopDeck.desktop");
 

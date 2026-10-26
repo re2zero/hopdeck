@@ -1,3 +1,7 @@
+// Windows: GUI subsystem so launching hopdeck-console.exe does not
+// open an extra console window alongside the console UI.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod console;
 mod ipc;
 

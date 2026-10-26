@@ -14,7 +14,7 @@ pkgdesc='Software KVM Switch / mouse & keyboard sharing software for Local Area 
 arch=('x86_64' 'aarch64')
 url='https://github.com/re2zero/hopdeck'
 license=('GPL-3.0-or-later')
-depends=('libadwaita' 'gtk4' 'libx11' 'libxtst' 'glib2' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
+depends=('libx11' 'libxtst' 'wayland' 'libxkbcommon' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname" "$_pkgname-git")
 source_x86_64=("$_pkgname-$pkgver-x86_64.tar.gz::https://github.com/re2zero/$_pkgname/releases/download/v$pkgver/$_pkgname-$pkgver-x86_64.tar.gz")
@@ -29,6 +29,7 @@ package() {
   # statement.
   cd "$srcdir/$_pkgname-$pkgver-$CARCH"
   install -Dm755 hopdeck "$pkgdir/usr/bin/hopdeck"
+  install -Dm755 hopdeck-console "$pkgdir/usr/bin/hopdeck-console"
   install -Dm644 com.hopdeck.HopDeck.desktop \
     "$pkgdir/usr/share/applications/com.hopdeck.HopDeck.desktop"
   install -Dm644 com.hopdeck.HopDeck.svg \

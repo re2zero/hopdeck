@@ -17,15 +17,15 @@
     </p>
     <p>
       HopDeck is a fork of lan-mouse by Florian Eschberger, via the Mousehop fork by
-      Jon Kinney, used under the GPL-3.0 license. It adds a native menu-bar app, a
-      system tray, per-peer tuning, sturdier discovery, and a refreshed UI. The
+      Jon Kinney, used under the GPL-3.0 license. It adds a GPUI control console,
+      per-peer tuning, sturdier discovery, and a refreshed UI. The
       project was renamed from Mousehop to HopDeck in October 2026.
     </p>
   </description>
   <screenshots>
     <screenshot type="default">
-      <caption>The HopDeck main window — peers, clipboard privacy, network discovery, and auto-release tuning</caption>
-      <image>https://raw.githubusercontent.com/re2zero/hopdeck/main/screenshots/hopdeck-prefs.png</image>
+      <caption>The HopDeck control console — peer detail, sharing options, and the screen layout canvas</caption>
+      <image>https://raw.githubusercontent.com/re2zero/hopdeck/main/screenshots/hopdeck-console.png</image>
     </screenshot>
   </screenshots>
   <categories>

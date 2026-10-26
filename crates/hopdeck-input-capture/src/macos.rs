@@ -2275,10 +2275,9 @@ mod modifier_tests {
 }
 
 fn request_accessibility_permission() -> bool {
-    // Silent check. The GUI owns the one-time user-visible prompt at
-    // startup (see hopdeck_gtk::macos_privacy) so retries triggered by
-    // clicking the "Reenable" button don't pop a fresh Accessibility
-    // alert every time.
+    // Silent check: permission is granted in System Settings, so retries
+    // don't pop a fresh Accessibility alert every time. The daemon's TCC
+    // watcher reacts to later revocations.
     unsafe { AXIsProcessTrusted() }
 }
 

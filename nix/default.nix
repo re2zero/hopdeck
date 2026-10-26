@@ -1,17 +1,14 @@
 {
-  stdenv,
   rustPlatform,
   lib,
   pkg-config,
   libX11,
-  gtk4,
-  libadwaita,
   libXtst,
-  wrapGAppsHook4,
-  librsvg,
+  wayland,
+  libxkbcommon,
+  vulkan-loader,
   git,
   dbus,
-  fontconfig,
 }:
 let
   # The workspace root is virtual (no [package]); the hopdeck
@@ -29,22 +26,18 @@ rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [
     pkg-config
-    wrapGAppsHook4
     git
   ];
 
   buildInputs = [
-    gtk4
-    libadwaita
-    librsvg
-  ]
-  ++ lib.optionals stdenv.isLinux [
     libX11
     libXtst
     dbus
-    # `glyph_font` links libfontconfig directly to register the bundled
-    # chord-chip faces; GTK propagates it, but declare it explicitly.
-    fontconfig
+    # The GPUI console links the Wayland/X11 client libraries and
+    # loads Vulkan at runtime.
+    wayland
+    libxkbcommon
+    vulkan-loader
   ];
 
   src = builtins.path {
@@ -57,9 +50,16 @@ rustPlatform.buildRustPackage {
   # Set Environment Variables
   RUST_BACKTRACE = "full";
 
+  # The console is excluded from the workspace default-members (gpui
+  # ashpd `async-io` vs. daemon ashpd `tokio`), so build it explicitly.
+  postBuild = ''
+    cargo build --release --offline -p hopdeck-console
+  '';
+
   postInstall = ''
+    install -Dm555 target/release/hopdeck-console $out/bin/hopdeck-console
     install -Dm444 apps/hopdeck/*.desktop -t $out/share/applications
-    install -Dm444 crates/hopdeck-gtk/resources/*.svg -t $out/share/icons/hicolor/scalable/apps
+    install -Dm444 apps/hopdeck/assets/*.svg -t $out/share/icons/hicolor/scalable/apps
   '';
 
   meta = with lib; {

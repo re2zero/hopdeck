@@ -6,7 +6,7 @@ The workspace splits reusable libraries from shipped executables:
 
 | Path | Package | Role |
 |------|---------|------|
-| `apps/hopdeck` | `hopdeck` | daemon binary + GTK settings app |
+| `apps/hopdeck` | `hopdeck` | daemon + CLI + console launcher |
 | `apps/hopdeck-console` | `hopdeck-console` | GPUI control console |
 | `crates/hopdeck-input-event` | `hopdeck-input-event` | shared input + app-identity types |
 | `crates/hopdeck-input-capture` | `hopdeck-input-capture` | OS capture backends |
@@ -15,7 +15,6 @@ The workspace splits reusable libraries from shipped executables:
 | `crates/hopdeck-ipc` | `hopdeck-ipc` | daemon ↔ frontend IPC |
 | `crates/hopdeck-video` | `hopdeck-video` | screen capture, codec, transport |
 | `crates/hopdeck-cli` | `hopdeck-cli` | CLI frontend library |
-| `crates/hopdeck-gtk` | `hopdeck-gtk` | GTK4 / Libadwaita frontend library |
 
 The data path is `hopdeck-input-capture` → daemon → `hopdeck-proto` over
 UDP+DTLS → daemon → `hopdeck-input-emulation`. The control path is

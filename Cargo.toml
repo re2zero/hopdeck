@@ -4,7 +4,20 @@ members = [
     "apps/hopdeck",
     "apps/hopdeck-console",
     "crates/hopdeck-cli",
-    "crates/hopdeck-gtk",
+    "crates/hopdeck-input-capture",
+    "crates/hopdeck-input-emulation",
+    "crates/hopdeck-input-event",
+    "crates/hopdeck-ipc",
+    "crates/hopdeck-proto",
+    "crates/hopdeck-video",
+]
+# gpui-base pulls ashpd with `async-io`, while the daemon's libei/portal
+# backends use ashpd with `tokio`; the two features abort the build when
+# unified. Keep the console out of the default set so a bare `cargo build`
+# works, and build it with an explicit `-p hopdeck-console` invocation.
+default-members = [
+    "apps/hopdeck",
+    "crates/hopdeck-cli",
     "crates/hopdeck-input-capture",
     "crates/hopdeck-input-emulation",
     "crates/hopdeck-input-event",
@@ -27,7 +40,6 @@ hopdeck-proto = { path = "crates/hopdeck-proto", version = "0.17.1" }
 hopdeck-video = { path = "crates/hopdeck-video", version = "0.17.1" }
 hopdeck-ipc = { path = "crates/hopdeck-ipc", version = "0.17.1" }
 hopdeck-cli = { path = "crates/hopdeck-cli", version = "0.17.1" }
-hopdeck-gtk = { path = "crates/hopdeck-gtk", version = "0.17.1" }
 
 [profile.release]
 codegen-units = 1

@@ -16,17 +16,29 @@ if ! git diff --quiet --exit-code; then
 fi
 
 echo "Running cargo clippy..."
-# Matches CI: deny warnings to keep code health strict
-if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+# Matches CI: deny warnings to keep code health strict. Two invocations
+# because gpui's ashpd `async-io` and the daemon's ashpd `tokio` cannot
+# be feature-unified in one build graph.
+if ! cargo clippy --workspace --exclude hopdeck-console --all-targets --all-features -- -D warnings; then
   echo "" >&2
-  echo "ERROR: clippy found warnings/errors. Fix them before committing." >&2
+  echo "ERROR: clippy found warnings/errors (daemon workspace). Fix them before committing." >&2
+  exit 1
+fi
+if ! cargo clippy -p hopdeck-console --all-targets --all-features -- -D warnings; then
+  echo "" >&2
+  echo "ERROR: clippy found warnings/errors (console). Fix them before committing." >&2
   exit 1
 fi
 
 echo "Running cargo test..."
-if ! cargo test --workspace --all-features; then
+if ! cargo test --workspace --exclude hopdeck-console --all-features; then
   echo "" >&2
-  echo "ERROR: Some tests failed. Fix tests before committing." >&2
+  echo "ERROR: Some tests failed (daemon workspace). Fix tests before committing." >&2
+  exit 1
+fi
+if ! cargo test -p hopdeck-console --all-features; then
+  echo "" >&2
+  echo "ERROR: Some tests failed (console). Fix tests before committing." >&2
   exit 1
 fi
 

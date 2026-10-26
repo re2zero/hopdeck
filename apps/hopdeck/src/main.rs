@@ -13,12 +13,9 @@ use hopdeck::{
     service::{Service, ServiceError},
 };
 use hopdeck_cli::CliError;
-#[cfg(feature = "gtk")]
-use hopdeck_gtk::GtkError;
 use hopdeck_ipc::{IpcError, IpcListenerCreationError};
 use input_capture::InputCaptureError;
 use input_emulation::InputEmulationError;
-#[cfg(feature = "gtk")]
 use std::process::Child;
 use std::{future::Future, io, process};
 use thiserror::Error;
@@ -38,9 +35,6 @@ enum HopDeckError {
     Capture(#[from] InputCaptureError),
     #[error(transparent)]
     Emulation(#[from] InputEmulationError),
-    #[cfg(feature = "gtk")]
-    #[error(transparent)]
-    Gtk(#[from] GtkError),
     #[error(transparent)]
     Cli(#[from] CliError),
 }
@@ -66,7 +60,7 @@ fn main() {
     let role = if std::env::args().skip(1).any(|a| a == "daemon") {
         "daemon"
     } else {
-        "gui"
+        "launcher"
     };
     hopdeck::panic_log::install(role);
 
@@ -116,34 +110,9 @@ fn run() -> Result<(), HopDeckError> {
             }
         },
         None => {
-            //  otherwise start the service as a child process and
-            //  run a frontend
-            #[cfg(all(feature = "gtk", unix))]
-            {
-                run_gui_with_daemon_supervision()?;
-            }
-            #[cfg(all(feature = "gtk", not(unix)))]
-            {
-                // Non-unix has no signal-based bounded teardown and no
-                // daemon supervisor (the screensaver-panic crash this
-                // guards against is macOS-specific). Keep the original
-                // spawn → run → kill lifecycle.
-                let mut service = start_service()?;
-                let res = hopdeck_gtk::run(gui_build_info());
-                let _ = service.kill();
-                let _ = service.wait();
-                res?;
-            }
-            #[cfg(not(feature = "gtk"))]
-            {
-                // run daemon if gtk is diabled
-                match run_async(run_service(config)) {
-                    Err(HopDeckError::Service(ServiceError::IpcListen(
-                        IpcListenerCreationError::AlreadyRunning,
-                    ))) => log::info!("service already running!"),
-                    r => r?,
-                }
-            }
+            //  otherwise start the daemon as a child process and
+            //  run the GPUI console as its frontend
+            run_console_with_daemon_supervision()?;
         }
     }
 
@@ -165,7 +134,29 @@ where
     Ok(runtime.block_on(LocalSet::new().run_until(f))?)
 }
 
-#[cfg(feature = "gtk")]
+/// Locate the GPUI console shipped next to this binary. Every packaging
+/// path (AUR, Flatpak, Nix, `cargo install`) installs both executables
+/// into the same `bin/`, so a sibling lookup needs no environment
+/// configuration. In a macOS bundle the console must be copied next to
+/// the launcher inside `Contents/MacOS/`.
+fn console_binary_path() -> Result<std::path::PathBuf, io::Error> {
+    let exe = std::env::current_exe()?;
+    let console = exe.with_file_name(format!("hopdeck-console{}", std::env::consts::EXE_SUFFIX));
+    if console.is_file() {
+        Ok(console)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "hopdeck-console not found next to {} — build it with \
+                 `cargo build -p hopdeck-console`, or run `hopdeck daemon` and \
+                 `hopdeck-console` separately",
+                exe.display()
+            ),
+        ))
+    }
+}
+
 fn start_service() -> Result<Child, io::Error> {
     let child = process::Command::new(std::env::current_exe()?)
         .args(std::env::args().skip(1))
@@ -174,37 +165,24 @@ fn start_service() -> Result<Child, io::Error> {
     Ok(child)
 }
 
-/// Build-time facts handed to the GTK frontend's About section.
-#[cfg(feature = "gtk")]
-fn gui_build_info() -> hopdeck_gtk::BuildInfo {
-    hopdeck_gtk::BuildInfo {
-        local_commit: config::local_commit(),
-        version: config::build::PKG_VERSION,
-        build_time: config::build::BUILD_TIME,
-        rust_version: config::build::RUST_VERSION,
-        source_url: "https://github.com/re2zero/hopdeck",
-    }
-}
-
-/// Run the GTK frontend with a supervised daemon child.
+/// Run the GPUI console with a supervised daemon child.
 ///
-/// The daemon does the actual capture/emulation/networking; the GUI is
-/// a menu-bar control panel in the parent process. If the daemon dies
-/// *abnormally* (e.g. a panic on a screensaver / sleep edge) while the
-/// GUI is up, a watcher thread respawns it so input sharing self-heals
-/// instead of going dead until the user relaunches the app — the GUI
-/// reconnects to the fresh daemon (see `hopdeck_gtk::build_ui`). A
-/// clean `exit(0)` (an intentional shutdown such as an Accessibility
-/// revoke) is left alone.
+/// The daemon does the actual capture/emulation/networking; the console
+/// (a separate binary) is the control surface and reconnects to a
+/// restarted daemon. If the daemon dies *abnormally* (e.g. a panic on a
+/// screensaver / sleep edge) while the console is up, a watcher thread
+/// respawns it so input sharing self-heals instead of going dead until
+/// the user relaunches the app. A clean `exit(0)` (an intentional
+/// shutdown such as an Accessibility revoke) is left alone.
 ///
-/// The supervisor polls `try_wait` rather than blocking on `wait` so
-/// the quit path can take the lock to terminate the current child.
-#[cfg(all(unix, feature = "gtk"))]
-fn run_gui_with_daemon_supervision() -> Result<(), HopDeckError> {
+/// The supervisor polls `try_wait` rather than blocking on `wait` so the
+/// console-quit path can take the lock to terminate the current child.
+fn run_console_with_daemon_supervision() -> Result<(), HopDeckError> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    let console = console_binary_path()?;
     let shutting_down = Arc::new(AtomicBool::new(false));
     let child = Arc::new(Mutex::new(start_service()?));
 
@@ -272,42 +250,56 @@ fn run_gui_with_daemon_supervision() -> Result<(), HopDeckError> {
             .ok()
     };
 
-    let res = hopdeck_gtk::run(gui_build_info());
+    let console_status = process::Command::new(&console)
+        .spawn()
+        .and_then(|mut child| child.wait());
 
-    // GUI exited (user quit). Stop the supervisor and tear down the
-    // current daemon child with the same bounded SIGINT → SIGKILL
-    // cleanup as before. The lock is released before joining the
-    // supervisor so it can observe `shutting_down` and exit.
+    // Console exited (user quit or a launch failure). Stop the
+    // supervisor and tear down the current daemon child with the same
+    // bounded SIGINT → SIGKILL cleanup as before. The lock is released
+    // before joining the supervisor so it can observe `shutting_down`
+    // and exit.
     shutting_down.store(true, Ordering::SeqCst);
     {
         let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
-        let pid = guard.id() as libc::pid_t;
-        unsafe {
-            libc::kill(pid, libc::SIGINT);
-        }
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            match guard.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if Instant::now() >= deadline => {
-                    log::warn!("daemon child did not exit on SIGINT in 3s — sending SIGKILL");
-                    let _ = guard.kill();
-                    let _ = guard.wait();
-                    break;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => {
-                    log::error!("waiting for daemon child: {e}");
-                    break;
+        #[cfg(unix)]
+        {
+            let pid = guard.id() as libc::pid_t;
+            unsafe {
+                libc::kill(pid, libc::SIGINT);
+            }
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                match guard.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() >= deadline => {
+                        log::warn!("daemon child did not exit on SIGINT in 3s — sending SIGKILL");
+                        let _ = guard.kill();
+                        let _ = guard.wait();
+                        break;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                    Err(e) => {
+                        log::error!("waiting for daemon child: {e}");
+                        break;
+                    }
                 }
             }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = guard.kill();
+            let _ = guard.wait();
         }
     }
     if let Some(h) = supervisor {
         let _ = h.join();
     }
 
-    res?;
+    let status = console_status?;
+    if !status.success() {
+        process::exit(status.code().unwrap_or(1));
+    }
     Ok(())
 }
 

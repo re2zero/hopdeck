@@ -152,8 +152,8 @@ mod backend {
     /// Enumerate user-visible apps via `osascript` → System Events.
     ///
     /// Three direct AppKit APIs all silently scope to the caller's
-    /// loginwindow / Aqua session — a non-Cocoa GTK process running
-    /// as the .app's main process does NOT have a full session, so
+    /// loginwindow / Aqua session — a headless daemon process does
+    /// NOT have a full session, so
     /// `NSWorkspace.runningApplications`, `NSRunningApplication
     /// .runningApplicationWithProcessIdentifier`, and
     /// `CGWindowListCopyWindowInfo` only return apps with which

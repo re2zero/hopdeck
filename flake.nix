@@ -99,14 +99,16 @@
               [
                 rustToolchain
                 pkg-config
-                gtk4
-                libadwaita
-                librsvg
               ]
               ++ lib.optionals pkgs.stdenv.isLinux [
                 libX11
                 libXtst
                 dbus
+                # GPUI (hopdeck-console) links the Wayland/X11 client
+                # libraries and loads Vulkan at runtime.
+                wayland
+                libxkbcommon
+                vulkan-loader
               ];
             env.RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
           };

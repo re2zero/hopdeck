@@ -23,7 +23,6 @@ input-event = { workspace = true }
 input-emulation = { workspace = true, default-features = false }
 input-capture = { workspace = true, default-features = false }
 hopdeck-cli = { workspace = true }
-hopdeck-gtk = { workspace = true, optional = true }
 hopdeck-ipc = { workspace = true }
 hopdeck-proto = { workspace = true }
 hopdeck-video = { workspace = true, optional = true }
@@ -89,7 +88,6 @@ core-graphics = { version = "0.25.0", features = ["highsierra"] }
 
 [features]
 default = [
-    "gtk",
     "layer_shell_capture",
     "x11_capture",
     "libei_capture",
@@ -99,7 +97,6 @@ default = [
     "x11_emulation",
     "usbip_emulation",
 ]
-gtk = ["dep:hopdeck-gtk"]
 layer_shell_capture = ["input-capture/layer_shell"]
 x11_capture = ["input-capture/x11"]
 libei_capture = ["input-event/libei", "input-capture/libei"]
@@ -117,17 +114,13 @@ video_portal = ["video", "hopdeck-video/portal"]
 
 [package.metadata.bundle]
 name = "HopDeck"
-# `target/` and `build-aux/` live at the workspace root. cargo-bundle
-# resolves these globs from the *current working directory* (not the
-# manifest), so the release workflow must `cd apps/hopdeck && cargo bundle`
-# — otherwise the icon, menu-bar template, and LSUIElement / TCC
-# usage-description plist are silently dropped from the .app.
+# `target/` lives at the workspace root. cargo-bundle resolves this glob
+# from the *current working directory* (not the manifest), so the release
+# workflow must `cd apps/hopdeck && cargo bundle` — otherwise the icon is
+# silently dropped from the .app.
 #
-# The `resources` glob's `..` segments are then rewritten to `_up_` by
-# cargo-bundle's resource_relpath, so `menubar-template.png` lands at
-# `Resources/_up_/target/...`. `scripts/copy-macos-dylib.sh` flattens
-# it back to the Resources root so NSBundle pathForResource: finds it.
+# The bundle is a normal windowed app: the GPUI console is copied next to
+# the launcher in Contents/MacOS by the release workflow, and the launcher
+# spawns it (see run_console_with_daemon_supervision in src/main.rs).
 icon = ["../../target/icon.icns"]
 identifier = "com.hopdeck.HopDeck"
-osx_info_plist_exts = ["../../build-aux/macos-lsui-element.plist"]
-resources = ["../../target/menubar-template.png"]

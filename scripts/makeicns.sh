@@ -3,21 +3,17 @@ set -e
 
 usage() {
     cat <<EOF
-$0: Build the macOS icns file and menu-bar template from the hopdeck SVGs.
+$0: Build the macOS icns file from the hopdeck app icon SVG.
 
 The app icon SVG is a self-contained rounded tile (its own background and
 rounded corners), so it is rendered straight into the Big Sur+ 824px squircle
-and centered on a 1024 canvas with transparent padding. The menu-bar template
-is the tray glyph, flattened to black+alpha so NSStatusBarButton can tint it
-for light and dark menu bars.
+and centered on a 1024 canvas with transparent padding.
 
-usage: $0 [APP_SVG [TRAY_SVG [ICNS [ICONSET]]]]
+usage: $0 [APP_SVG [ICNS [ICONSET]]]
 
 ARGUMENTS
     APP_SVG  The app icon SVG (a self-contained rounded tile)
-             Defaults to ./crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg
-    TRAY_SVG The tray / menu-bar glyph SVG
-             Defaults to ./crates/hopdeck-gtk/resources/icons/hopdeck-tray.svg
+             Defaults to ./apps/hopdeck/assets/com.hopdeck.HopDeck.svg
     ICNS     The icns file to create
              Defaults to ./target/icon.icns
     ICONSET  The iconset directory to create
@@ -31,10 +27,9 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     exit 0
 fi
 
-app_svg="${1:-./crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg}"
-tray_svg="${2:-./crates/hopdeck-gtk/resources/icons/hopdeck-tray.svg}"
-icns="${3:-./target/icon.icns}"
-iconset="${4:-./target/icon.iconset}"
+app_svg="${1:-./apps/hopdeck/assets/com.hopdeck.HopDeck.svg}"
+icns="${2:-./target/icon.icns}"
+iconset="${3:-./target/icon.iconset}"
 
 set -u
 
@@ -80,15 +75,6 @@ cp "$workdir/32.png"   "$iconset"/icon_16x16@2x.png
 cp "$workdir/16.png"   "$iconset"/icon_16x16.png
 
 mkdir -p "$(dirname "$icns")"
-
-# Menu-bar template icon: render the tray glyph (the purpose-built small-size
-# mark) and flatten all RGB channels to 0 (black) while keeping alpha, so the
-# artwork reads as a clean silhouette. NSStatusBarButton tints template images
-# to match the menu bar appearance in light and dark modes.
-menubar_template="$(dirname "$icns")/menubar-template.png"
-rsvg-convert -w 44 -h 44 "$tray_svg" -o "$workdir/menubar-44.png"
-magick "$workdir/menubar-44.png" -channel RGB -evaluate set 0 +channel \
-    "$menubar_template"
 
 if ! iconutil -c icns "$iconset" -o "$icns"; then
     if ! command -v perl >/dev/null 2>&1; then

@@ -2,7 +2,7 @@
 
 ## Overview
 
-HopDeck（桌联）is an open-source Software KVM sharing mouse/keyboard input across local networks. The Rust workspace combines two frontends (a GTK4 / Libadwaita settings app and a GPUI control console), CLI/daemon mode, and multi-OS capture/emulation backends for Linux, Windows, and macOS.
+HopDeck（桌联）is an open-source Software KVM sharing mouse/keyboard input across local networks. The Rust workspace combines one GPUI frontend (the control console), CLI/daemon mode, and multi-OS capture/emulation backends for Linux, Windows, and macOS.
 
 ## Core principles
 
@@ -21,7 +21,7 @@ HopDeck（桌联）is an open-source Software KVM sharing mouse/keyboard input a
 
 Libraries live in `crates/`, shipped executables in `apps/`:
 
-- `apps/hopdeck` — `hopdeck` binary: daemon + GTK settings app (package `hopdeck`, lib + bin).
+- `apps/hopdeck` — `hopdeck` binary: daemon + CLI + launcher for the console (package `hopdeck`, lib + bin).
 - `apps/hopdeck-console` — `hopdeck-console` binary: GPUI control console.
 - `crates/hopdeck-input-event` — shared input types, scancodes, and app-identity types (`AppIdent`, `HostKind`, `RunningApp`).
 - `crates/hopdeck-input-capture` — OS capture backends.
@@ -30,13 +30,15 @@ Libraries live in `crates/`, shipped executables in `apps/`:
 - `crates/hopdeck-ipc` — daemon ↔ frontend IPC (JSON over a Unix socket).
 - `crates/hopdeck-video` — screen capture, H.264 codec, transport.
 - `crates/hopdeck-cli` — CLI frontend library.
-- `crates/hopdeck-gtk` — GTK4 / Libadwaita frontend library.
+
+No-argument `hopdeck` starts the daemon as a child and runs the sibling
+`hopdeck-console` binary; when the console exits, the daemon is stopped.
 
 ## Architecture
 
 **Data path:** `input-capture` → `hopdeck` daemon → `hopdeck-proto` (UDP + DTLS) → `hopdeck` daemon → `input-emulation`
 
-**Control path:** frontends (`hopdeck-gtk`, `hopdeck-console`, `hopdeck-cli`) ↔ `hopdeck-ipc` ↔ `hopdeck` daemon
+**Control path:** frontends (`hopdeck-console`, `hopdeck-cli`) ↔ `hopdeck-ipc` ↔ `hopdeck` daemon
 
 - **input-capture:** Reads OS events into a `Stream<CaptureEvent>`. Backends tried in priority order (libei → layer-shell → X11 → fallback). Tracks `pressed_keys` to avoid stuck modifiers. `position_map` queues events when multiple clients share a screen edge.
 - **input-emulation:** Replays events via the `Emulation` trait (`consume`, `create`, `destroy`, `terminate`). Maintains `pressed_keys` and releases them on disconnect.
@@ -59,18 +61,26 @@ Libraries live in `crates/`, shipped executables in `apps/`:
 ## Commands
 
 ```sh
-cargo build --workspace                                    # full build
+cargo build                                                # daemon + CLI (workspace default-members)
+cargo build -p hopdeck-console                             # GPUI console (separate invocation: ashpd feature conflict)
 cargo build -p hopdeck                                     # one crate
-cargo test --workspace                                     # all tests
-cargo fmt && cargo clippy --workspace --all-targets --all-features  # lint
+cargo test --workspace --exclude hopdeck-console           # daemon-side tests
+cargo test -p hopdeck-console                              # console tests
+cargo fmt && cargo clippy --workspace --exclude hopdeck-console --all-targets --all-features
+cargo clippy -p hopdeck-console --all-targets --all-features
 RUST_LOG=hopdeck=debug cargo run -p hopdeck                # debug logging
 cargo test -p hopdeck-console --features ui-test-support   # console UI tests
 ```
 
+The console and daemon cannot share one cargo invocation: gpui enables
+ashpd's `async-io` feature, while the daemon's libei/portal backends enable
+ashpd's `tokio` feature and ashpd rejects both at once. This is why the
+console is not a default workspace member.
+
 Run from repo root—no `cd` in scripts.
 
-Headless environments without GTK development libraries cannot build the GTK
-frontend. For daemon-only verification use:
+Headless environments without X11/Wayland development libraries cannot build
+the full workspace. For daemon-only verification use:
 
 ```sh
 cargo test -p hopdeck --no-default-features --features video
@@ -80,7 +90,7 @@ cargo clippy -p hopdeck --no-default-features --features video --all-targets
 ## Testing
 
 - Unit tests for utilities; integration tests for protocol behavior.
-- OS-specific backends: test via GTK/CLI on target OS or document manual verification.
+- OS-specific backends: test via the console/CLI on target OS or document manual verification.
 - Dummy backend exercises pipeline without real dependencies.
 - Verify `terminate()` releases keys on unexpected disconnect.
 - GPUI UI tests need `--features ui-test-support` and an `.id(...)` element
@@ -91,4 +101,5 @@ cargo clippy -p hopdeck --no-default-features --features video --all-targets
 1. Clarify ambiguous requirements, especially OS-specific behavior.
 2. Implement minimal change; flag follow-up work.
 3. Add proportional tests; run `cargo test` on affected crates.
-4. Run `cargo fmt` and `cargo clippy --workspace --all-targets --all-features`.
+4. Run `cargo fmt`, then clippy and tests as two invocations (daemon workspace
+   with `--exclude hopdeck-console`, then the console).

@@ -12,11 +12,10 @@
 //!    a `1Password` class — both resolve.
 //!
 //! 2. Resolve a freedesktop icon *name* (e.g. `firefox`) into
-//!    raster bytes that GTK can load via `gdk::Texture::from_bytes`.
-//!    PNG is preferred; SVG falls through to gdk-pixbuf's librsvg
-//!    loader on the GTK side. The picker target is ~64–128 px so
-//!    we prefer those sizes and degrade gracefully when only
-//!    larger or scalable variants exist.
+//!    raster bytes a frontend can display. PNG is preferred; SVG is
+//!    returned only when no raster size exists. The picker target is
+//!    ~64–128 px so we prefer those sizes and degrade gracefully when
+//!    only larger or scalable variants exist.
 //!
 //! Scope is intentionally narrow: this module exists to make the
 //! suppression-list modal show "Firefox" with its real icon
@@ -184,8 +183,7 @@ pub fn icon_bytes_for_name(icon_name: &str) -> Option<Vec<u8>> {
                 return Some(bytes);
             }
         }
-        // Scalable (SVG) fallback. gdk-pixbuf with librsvg loaded
-        // can render this directly via gdk::Texture::from_bytes.
+        // Scalable (SVG) fallback, for frontends that can decode it.
         let svg = base
             .join("scalable")
             .join("apps")

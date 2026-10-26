@@ -5,7 +5,7 @@
 //! so the canvas is a live view of `config.pos` with capacity guards,
 //! not a separate layout store. There is deliberately no "unplaced"
 //! state: the daemon's `Position` has no such variant (adding one spans
-//! capture/emulation/GTK and is parked as a product decision), so every
+//! capture/emulation/frontends and is parked as a product decision), so every
 //! device sits in exactly one slot and dropping onto an occupied one is
 //! rejected with a toast.
 
