@@ -327,13 +327,60 @@ fn run_pump_inner(
                     chunk.stride(),
                 )
             };
-            let Some(raw) = data.data() else {
+            if size == 0 {
                 return;
+            }
+            // Older xdg-desktop-portal-wlr releases advertise their shm
+            // buffers MAPPABLE but not READABLE, and current libpipewire
+            // honours that when it maps them: `spa_data.data` points at a
+            // PROT_NONE mapping, so the first touch faults (SEGV_ACCERR at
+            // the buffer's base — observed on UOS 25 + portal-wlr 0.7).
+            // Map MemFd payloads read-only ourselves instead of trusting it.
+            let bgra = match data.type_() {
+                pw::spa::buffer::DataType::MemFd => {
+                    let desc = data.as_raw();
+                    let fd = desc.fd as std::os::fd::RawFd;
+                    let mapoffset = u64::from(desc.mapoffset);
+                    let maxsize = usize::try_from(desc.maxsize).unwrap_or(0);
+                    if fd < 0 || maxsize == 0 {
+                        return;
+                    }
+                    let ptr = unsafe {
+                        libc::mmap(
+                            std::ptr::null_mut(),
+                            maxsize,
+                            libc::PROT_READ,
+                            libc::MAP_SHARED,
+                            fd,
+                            mapoffset as libc::off_t,
+                        )
+                    };
+                    if ptr == libc::MAP_FAILED {
+                        log::warn!(
+                            "video: portal buffer mmap failed: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        return;
+                    }
+                    let converted = {
+                        let raw = unsafe { std::slice::from_raw_parts(ptr as *const u8, maxsize) };
+                        let start = offset.min(raw.len());
+                        let end = offset.saturating_add(size).min(raw.len());
+                        bgra_from_bgrx(&raw[start..end], stride as usize, width, height)
+                    };
+                    unsafe { libc::munmap(ptr, maxsize) };
+                    converted
+                }
+                _ => {
+                    let Some(raw) = data.data() else {
+                        return;
+                    };
+                    let start = offset.min(raw.len());
+                    let end = offset.saturating_add(size).min(raw.len());
+                    bgra_from_bgrx(&raw[start..end], stride as usize, width, height)
+                }
             };
-            let start = offset.min(raw.len());
-            let end = offset.saturating_add(size).min(raw.len());
-            let Some(bgra) = bgra_from_bgrx(&raw[start..end], stride as usize, width, height)
-            else {
+            let Some(bgra) = bgra else {
                 log::warn!(
                     "video: portal frame too small: {size}B @stride {stride} for {width}x{height}"
                 );
@@ -385,7 +432,10 @@ fn run_pump_inner(
         .connect(
             pipewire::spa::utils::Direction::Input,
             Some(node_id),
-            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            // No MAP_BUFFERS: the process callback maps MemFd payloads itself
+            // (see the PROT_NONE note there), so libpipewire's own mapping
+            // would only duplicate the address space.
+            pw::stream::StreamFlags::AUTOCONNECT,
             &mut params,
         )
         .map_err(map_err)?;

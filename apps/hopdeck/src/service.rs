@@ -1000,10 +1000,12 @@ impl Service {
                     self.live_incoming.remove(&addr);
                 }
                 // An input session died: stop streaming to whoever held the
-                // video channel. Coarse by design (any disconnect halts all
-                // sends) — the next `Connected` re-announces and the peer
-                // re-dials, and v1 keeps a single video session anyway.
-                self.video.halt();
+                // video channel, but keep the listener. Coarse by design
+                // (any disconnect ends all sends) — the next `Connected`
+                // re-announces the same port and the reconnected peer
+                // re-dials; halting the host here would kill screen sharing
+                // until the user toggled it off and on again.
+                self.video.stop_sending();
             }
             EmulationEvent::PortChanged(port) => match port {
                 Ok(port) => {

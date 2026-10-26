@@ -4104,6 +4104,7 @@ dependencies = [
  "ashpd",
  "futures",
  "futures-core",
+ "libc",
  "log",
  "openh264",
  "pipewire",

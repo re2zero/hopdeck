@@ -23,6 +23,8 @@ ashpd = { version = "0.13.9", default-features = false, features = [
     "tokio",
 ], optional = true }
 pipewire = { version = "0.10.1", optional = true }
+# mmap/munmap for portal shm buffers the pump maps itself.
+libc = "0.2"
 
 [features]
 # xdg-desktop-portal ScreenCast capture (Linux). The portal dialog and

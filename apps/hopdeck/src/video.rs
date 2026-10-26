@@ -54,6 +54,8 @@ mod imp {
         }
 
         pub(super) fn halt(&mut self) {}
+
+        pub(super) fn stop_sending(&mut self) {}
     }
 
     /// No-op stand-in: every event is ignored.
@@ -103,7 +105,15 @@ impl VideoHost {
         self.0.offer()
     }
 
-    /// Stop every send session (input session died, service shutting down).
+    /// End the send session without tearing down the listener: the peer's
+    /// input session dropped (daemon restart, blip), and a reconnect
+    /// re-offers the same port.
+    pub(crate) fn stop_sending(&mut self) {
+        self.0.stop_sending()
+    }
+
+    /// Stop every send session and the listener (video disabled, service
+    /// shutting down).
     pub(crate) fn halt(&mut self) {
         self.0.halt()
     }
@@ -164,8 +174,10 @@ impl VideoPeer {
 #[cfg(feature = "video")]
 mod imp {
     use super::{Certificate, ClientHandle, IncomingPeerConfig, ProtoEvent, VideoConfig};
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::rc::Rc;
     use std::sync::{Arc, RwLock};
     use std::time::{Duration, Instant};
 
@@ -340,6 +352,9 @@ mod imp {
         portal: portal_glue::Slot,
         /// Kills the accept loop, every send session and the capture.
         halt: CancellationToken,
+        /// Cancelled and replaced by `stop_sending`: ends the current send
+        /// sessions while the listener (and the announced port) survives.
+        streams: Rc<RefCell<CancellationToken>>,
         /// Set by `halt`: the accept loop is gone for the process lifetime,
         /// so the announced port is dead — `offer` stops advertising it
         /// instead of promising pixels nothing will ever deliver.
@@ -352,11 +367,14 @@ mod imp {
             authorized_keys: Arc<RwLock<HashMap<String, IncomingPeerConfig>>>,
             config: VideoConfig,
         ) -> Self {
+            let halt = CancellationToken::new();
+            let streams = Rc::new(RefCell::new(halt.child_token()));
             let disabled = Self {
                 port: 0,
                 config,
                 portal: portal_glue::new_slot(),
-                halt: CancellationToken::new(),
+                halt: halt.clone(),
+                streams: Rc::clone(&streams),
                 halted: false,
             };
             if !config.enabled {
@@ -417,7 +435,6 @@ mod imp {
                 return disabled;
             }
             log::info!("video: listening for DTLS on {bound}");
-            let halt = CancellationToken::new();
             let portal = portal_glue::new_slot();
             if matches!(config.source, VideoSourceKind::Portal) {
                 log::info!(
@@ -430,12 +447,14 @@ mod imp {
                 config,
                 Arc::clone(&portal),
                 halt.clone(),
+                Rc::clone(&streams),
             ));
             Self {
                 port,
                 config,
                 portal,
                 halt,
+                streams,
                 halted: false,
             }
         }
@@ -459,6 +478,19 @@ mod imp {
                 width,
                 height,
             })
+        }
+
+        /// An input session died: end the send session streaming to its
+        /// holder, but keep the listener. The next `Connected` re-announces
+        /// the same port and the reconnected peer dials it again — halting
+        /// the whole host here would kill screen sharing for the process
+        /// lifetime (observed on a real device: a daemon restart on either
+        /// side closed the listener for good).
+        pub(super) fn stop_sending(&mut self) {
+            let mut streams = self.streams.borrow_mut();
+            let previous = streams.clone();
+            *streams = self.halt.child_token();
+            previous.cancel();
         }
 
         pub(super) fn halt(&mut self) {
@@ -498,6 +530,7 @@ mod imp {
         config: VideoConfig,
         portal: portal_glue::Slot,
         halt: CancellationToken,
+        streams: Rc<RefCell<CancellationToken>>,
     ) {
         loop {
             tokio::select! {
@@ -508,7 +541,9 @@ mod imp {
                 // workaround for https://github.com/webrtc-rs/webrtc/issues/614
                 _ = tokio::time::sleep(Duration::from_secs(2)) => continue,
                 accepted = listener.accept() => match accepted {
-                    Ok((conn, addr)) => start_send_session(conn, addr, &config, &portal, &halt),
+                    Ok((conn, addr)) => {
+                        start_send_session(conn, addr, &config, &portal, &streams)
+                    }
                     Err(e) => {
                         if halt.is_cancelled() {
                             break;
@@ -524,17 +559,18 @@ mod imp {
 
     /// An authorized peer dialed the video port: it replaces any previous
     /// sender (single slot — the newest picture wins). The session's tasks
-    /// clean up via their token (peer close observed by the read loop) or
-    /// the global halt; no join bookkeeping is kept.
+    /// clean up via their token (peer close observed by the read loop), a
+    /// `stop_sending` (input session died) or the global halt; no join
+    /// bookkeeping is kept.
     fn start_send_session(
         conn: ArcConn,
         addr: SocketAddr,
         config: &VideoConfig,
         portal: &portal_glue::Slot,
-        halt: &CancellationToken,
+        streams: &Rc<RefCell<CancellationToken>>,
     ) {
         log::info!("video: authorized peer {addr} dialed the video channel — sending");
-        let token = halt.child_token();
+        let token = streams.borrow().clone();
         // Reverse-direction traffic: the receiver's keyframe requests
         // arrive here and turn into a forced IDR in `send_loop`.
         let (pli_tx, pli_rx) = mpsc::unbounded_channel();
@@ -606,10 +642,17 @@ mod imp {
         };
         let start = Instant::now();
         let mut sent_frames = 0u64;
+        // Config geometry is only what a dummy source delivers; a portal
+        // stream carries whatever the compositor negotiated, so report that
+        // rather than the stale request.
+        let (announced_width, announced_height) = match config.source {
+            VideoSourceKind::Portal => {
+                portal_glue::geometry(&portal).unwrap_or((config.width, config.height))
+            }
+            VideoSourceKind::Dummy => (config.width, config.height),
+        };
         log::info!(
-            "video: streaming to {peer} (source: {source_name}, announced {}x{}@{}fps{})",
-            config.width,
-            config.height,
+            "video: streaming to {peer} (source: {source_name}, {announced_width}x{announced_height}@{}fps{})",
             config.max_fps,
             if config.parity {
                 format!(
@@ -1109,21 +1152,44 @@ mod imp {
     mod host_halt {
         use super::*;
 
+        fn host() -> Host {
+            let halt = CancellationToken::new();
+            let streams = Rc::new(RefCell::new(halt.child_token()));
+            Host {
+                port: 4262,
+                config: VideoConfig::default(),
+                portal: portal_glue::new_slot(),
+                halt,
+                streams,
+                halted: false,
+            }
+        }
+
         /// A halted host must stop advertising its port: the accept loop is
         /// gone for the process lifetime, so a fresh input session would
         /// otherwise dial into a dead end (增量⑥, D38⑦).
         #[test]
         fn offer_stops_after_halt() {
-            let mut host = Host {
-                port: 4262,
-                config: VideoConfig::default(),
-                portal: portal_glue::new_slot(),
-                halt: CancellationToken::new(),
-                halted: false,
-            };
+            let mut host = host();
             assert!(host.offer().is_some());
             host.halt();
             assert!(host.offer().is_none());
+        }
+
+        /// An input-session drop must end the current stream only: the
+        /// listener keeps running, so a reconnected peer still gets the
+        /// offer and can dial the same port.
+        #[test]
+        fn stop_sending_keeps_the_listener_announceable() {
+            let mut host = host();
+            let session = host.streams.borrow().clone();
+            host.stop_sending();
+            assert!(host.offer().is_some());
+            assert!(session.is_cancelled(), "current send session must end");
+            assert!(
+                !host.streams.borrow().is_cancelled(),
+                "the next session must start uncancelled"
+            );
         }
     }
 }
