@@ -722,6 +722,7 @@ impl MousehopConnection {
         addr: SocketAddr,
     ) {
         log::info!("client ({handle}) adopting inbound transport from {addr}");
+        record_peer_fingerprint(&self.client_manager, handle, &conn).await;
         let session = self.sessions.allocate(handle);
         // Input stays gated until the adopted peer completes the
         // protocol handshake and answers a ping, same as after a dial.
@@ -850,6 +851,30 @@ async fn finish_failed_dial(
     remove_connecting_if_current(connecting, handle, session).await;
 }
 
+/// Link the authenticated peer certificate to the client entry so the
+/// dialing side's trust view works like the listener's (which records
+/// the same fingerprint at `Accept`). Without this, a dialer whose
+/// authorized entry went stale shows 「未信任」 even mid-session.
+/// `set_peer_fingerprint` marks the client dirty; the service's
+/// periodic frontend sync re-broadcasts it — no dedicated event.
+async fn record_peer_fingerprint(
+    client_manager: &ClientManager,
+    handle: ClientHandle,
+    conn: &ArcConn,
+) {
+    let Some(dtls) = conn.as_any().downcast_ref::<DTLSConn>() else {
+        return;
+    };
+    let state = dtls.connection_state().await;
+    let Some(cert) = state.peer_certificates.first() else {
+        return;
+    };
+    let fingerprint = crypto::generate_fingerprint(cert);
+    if client_manager.set_peer_fingerprint(handle, Some(fingerprint.clone())) {
+        log::info!("client {handle}: peer fingerprint {fingerprint} linked from the session");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connect_to_handle(
     client_manager: ClientManager,
@@ -941,6 +966,7 @@ async fn connect_to_handle(
             return Err(MousehopConnectionError::NotConnected);
         }
         log::info!("client ({handle}) connected @ {addr}");
+        record_peer_fingerprint(&client_manager, handle, &conn).await;
 
         // Reverse-connect: this host dials *out* to its controller
         // because the controller cannot reach it inbound, and the
