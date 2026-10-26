@@ -844,18 +844,21 @@ impl Console {
         &self,
         visible: &[DeviceEntry],
         resize_zones: Option<gpui_kit::AnyElement>,
+        client_decorated: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let own_controls = needs_own_window_controls(client_decorated);
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // Bare drag strip: the window manager already identifies the
-            // app (公子: 标题没必要). The minimize/maximize/close buttons
-            // are drawn here rather than relying on the platform's
-            // window_controls(), which not every backend reports.
-            .child(
-                TitleBar::new().child(
+            // app (公子: 标题没必要). `TitleBar` appends its own
+            // minimize/maximize/close under client-side decorations; our
+            // set is only the X11 fallback where gpui chose server
+            // decorations and `window_deco` removed the WM title bar.
+            .child(TitleBar::new().when(own_controls, |bar| {
+                bar.child(
                     h_flex()
                         .ml_auto()
                         .items_center()
@@ -885,8 +888,8 @@ impl Console {
                                     window.remove_window();
                                 })),
                         ),
-                ),
-            )
+                )
+            }))
             .child(self.render_main(visible, cx))
             .when(self.debug_open, |shell| {
                 shell.child(self.render_log_bar(cx))
@@ -1370,14 +1373,34 @@ impl Render for Console {
                 .collect()
         };
         let resize_zones = window_deco::resize_zone_overlay(window).map(|e| e.into_any_element());
-        self.render_shell(&visible, resize_zones, cx)
+        let client_decorated = matches!(
+            window.window_decorations(),
+            gpui_kit::Decorations::Client { .. }
+        );
+        self.render_shell(&visible, resize_zones, client_decorated, cx)
     }
+}
+
+/// Whether the console must paint its own minimize/maximize/close.
+///
+/// `gpui-component`'s `TitleBar` already appends its `WindowControls`
+/// under client-side decorations — drawing ours as well stacks two sets.
+/// Our set survives only for the X11 fallback: gpui chose server
+/// decorations and [`window_deco::strip_server_frame`] actually removed
+/// the WM title bar, so no other controls are left.
+fn needs_own_window_controls(client_decorated: bool) -> bool {
+    !client_decorated && window_deco::server_frame_stripped()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn client_decorations_defer_window_controls_to_title_bar() {
+        assert!(!needs_own_window_controls(true));
+    }
 
     #[test]
     fn parse_direct_address_accepts_bare_ip() {

@@ -35,6 +35,13 @@ mod imp {
         FRAME_STRIPPED.load(Ordering::Relaxed)
     }
 
+    /// Read-only view for the render path: the console paints its own
+    /// window controls only when the WM title bar was actually removed.
+    /// With the frame still in place the WM supplies them.
+    pub fn server_frame_stripped() -> bool {
+        frame_stripped()
+    }
+
     /// Hide the system title bar on X11. Spawns a polling thread because
     /// the window is created asynchronously relative to callers.
     pub fn strip_server_frame() {
@@ -197,7 +204,7 @@ mod imp {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use imp::{resize_zone_overlay, strip_server_frame};
+pub(crate) use imp::{resize_zone_overlay, server_frame_stripped, strip_server_frame};
 
 #[cfg(not(target_os = "linux"))]
 mod imp {
@@ -205,10 +212,14 @@ mod imp {
 
     pub fn strip_server_frame() {}
 
+    pub fn server_frame_stripped() -> bool {
+        false
+    }
+
     pub fn resize_zone_overlay(_window: &Window) -> Option<impl IntoElement> {
         None::<gpui_kit::AnyElement>
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) use imp::{resize_zone_overlay, strip_server_frame};
+pub(crate) use imp::{resize_zone_overlay, server_frame_stripped, strip_server_frame};
