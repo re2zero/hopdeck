@@ -33,6 +33,7 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
+use webrtc_dtls::crypto::Certificate;
 
 async fn shutdown_signal() -> io::Result<()> {
     #[cfg(unix)]
@@ -104,9 +105,23 @@ pub struct Service {
     incoming_conns: HashSet<SocketAddr>,
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
+    /// Listener sessions accepted (`Connected`) and still up, keyed by
+    /// source addr — the announce targets when the video master switch
+    /// flips mid-run. `incoming_conn_info` only fills at `Entered`
+    /// (the cursor actually crossing), which is too late for sharing:
+    /// a connected-but-never-entered peer must still learn the offer.
+    live_incoming: HashMap<SocketAddr, ListenerSession>,
     /// Video channel sender (M3a). Inert unless the `video` feature is
     /// compiled and `[video] enabled = true` — `offer()` returns `None`.
     video: crate::video::VideoHost,
+    /// Kept so `SetVideoEnabled` can respawn the host mid-run with the
+    /// identity the input listener already advertises.
+    cert: Certificate,
+    /// Mirror of the sharing-side master switch, echoed as
+    /// `FrontendEvent::VideoShare` on change and on `Sync`. `true`
+    /// whenever the switch says on — even when a broken `[video]`
+    /// section or a missing `video` feature left the host itself inert.
+    video_share_enabled: bool,
     /// Last mirror the capture side reported for the controlling-side
     /// video channel (offer on file / viewing / geometry). Broadcast as
     /// `FrontendEvent::VideoState` on change and on `Sync`.
@@ -299,6 +314,7 @@ impl Service {
         // Video channel (M3a). Bound before the first input session can be
         // announced; a bind failure logs and disables video, never fatal.
         let video_config = config.video();
+        let video_share_enabled = video_config.enabled;
         if video_config.enabled && !cfg!(feature = "video") {
             log::warn!(
                 "config [video] enabled = true, but this binary was built without the \
@@ -385,7 +401,10 @@ impl Service {
             emulation_status: Default::default(),
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
+            live_incoming: Default::default(),
             video,
+            cert,
+            video_share_enabled,
             video_state: Default::default(),
             tunnel_forwards: forward_specs,
             remote_host_states: Default::default(),
@@ -675,6 +694,9 @@ impl Service {
                 // running the request loop still processes it, so the
                 // toggle works without a capture backend too.
                 self.capture.set_video_view(handle, view);
+            }
+            FrontendRequest::SetVideoEnabled(enabled) => {
+                self.set_video_share(enabled).await;
             }
         }
     }
@@ -971,6 +993,12 @@ impl Service {
                 if let Some(addr) = self.remove_incoming(addr, session) {
                     self.notify_frontend(FrontendEvent::IncomingDisconnected(addr));
                 }
+                // Only drop the announce target for the session that
+                // actually died: a late disconnect for a replaced
+                // generation must not unregister its successor.
+                if self.live_incoming.get(&addr) == Some(&session) {
+                    self.live_incoming.remove(&addr);
+                }
                 // An input session died: stop streaming to whoever held the
                 // video channel. Coarse by design (any disconnect halts all
                 // sends) — the next `Connected` re-announces and the peer
@@ -1040,6 +1068,9 @@ impl Service {
                 }
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
                 self.maybe_adopt_reverse_session(addr, session).await;
+                // Track the live session for mid-run video announces;
+                // a replacement session overwrites the stale entry.
+                self.live_incoming.insert(addr, session);
                 // Video announce (M3a). Reverse-mode sessions offer no
                 // inbound path for the peer to dial our video port, so they
                 // stay silent — D34: v1 ships video for direct topology only.
@@ -1272,6 +1303,79 @@ impl Service {
             width: self.video_state.width,
             height: self.video_state.height,
             max_fps: self.video_state.max_fps,
+        }
+    }
+
+    /// The `SetVideoEnabled` handler: persist the sharing-side master
+    /// switch, then rebuild the video host so the choice takes effect
+    /// without a daemon restart (P1.2). Enabling announces the fresh
+    /// offer on every established direct session; disabling withdraws
+    /// it before the host's own channels die. Always echoes
+    /// `VideoShare`, so the frontend switch settles even on no-ops.
+    async fn set_video_share(&mut self, enabled: bool) {
+        if self.video_share_enabled == enabled {
+            self.notify_frontend(self.video_share_event());
+            return;
+        }
+        self.video_share_enabled = enabled;
+        self.config.set_video_enabled(enabled);
+        self.save_config().await;
+        if !enabled {
+            // Withdraw while the announcing input sessions are still
+            // alive: viewers clear the offer and hang up their receive
+            // channel before `halt` kills the host side.
+            self.announce_video_to_sessions(ProtoEvent::VideoStop);
+            self.video.halt();
+        } else {
+            if !cfg!(feature = "video") {
+                log::warn!(
+                    "config [video] enabled = true, but this binary was built without the \
+                     `video` feature — screen sharing disabled"
+                );
+            }
+            let mut video_config = self.config.video();
+            video_config.enabled = true;
+            self.video = crate::video::VideoHost::spawn(
+                self.cert.clone(),
+                self.authorized_keys.clone(),
+                video_config,
+            )
+            .await;
+            // A portal source has no geometry until its capture
+            // negotiates; `offer()` then returns `None` and existing
+            // sessions stay silent until they re-establish (or until a
+            // later toggle round announces them).
+            if let Some(offer) = self.video.offer() {
+                self.announce_video_to_sessions(offer);
+            }
+        }
+        self.notify_frontend(self.video_share_event());
+    }
+
+    /// Announce a video-channel event (the offer on enable,
+    /// `VideoStop` on disable) on every established direct-mode
+    /// incoming session. The `Connected` arm announces per new session;
+    /// this catches sessions that predate the switch flip. Delivery is
+    /// best-effort: the listen task drops announces for replaced
+    /// sessions, and reverse sessions have no inbound path for a peer
+    /// to dial (D34) — the same rule the Connected arm applies.
+    fn announce_video_to_sessions(&self, event: ProtoEvent) {
+        for (addr, session) in &self.live_incoming {
+            let reverse = self.client_manager.get_client(*addr).is_some_and(|handle| {
+                self.client_manager.connect_mode(handle) == ConnectMode::Reverse
+            });
+            if reverse {
+                log::debug!("video: skipping announce on reverse session {session} from {addr}");
+                continue;
+            }
+            self.emulation
+                .announce_video(*addr, *session, event.clone());
+        }
+    }
+
+    fn video_share_event(&self) -> FrontendEvent {
+        FrontendEvent::VideoShare {
+            enabled: self.video_share_enabled,
         }
     }
 
@@ -1581,6 +1685,7 @@ impl Service {
         let keys = self.authorized_keys.read().expect("lock").clone();
         self.notify_frontend(FrontendEvent::AuthorizedUpdated(keys));
         self.notify_frontend(self.video_state_event());
+        self.notify_frontend(self.video_share_event());
         let host_list = self.config.clipboard_suppression().host().clone();
         self.notify_frontend(FrontendEvent::SuppressedAppsUpdated(host_list));
         let recovery_events: Vec<_> = self

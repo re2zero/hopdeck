@@ -794,6 +794,15 @@ pub enum FrontendEvent {
         #[serde(default)]
         max_fps: u16,
     },
+    /// The sharing side's screen-sharing master switch (`[video]`
+    /// `enabled` in config.toml), pushed when it flips via
+    /// [`FrontendRequest::SetVideoEnabled`] and on `Sync`. This is the
+    /// state of *this* machine being viewable — per-client viewing
+    /// state rides [`FrontendEvent::VideoState`].
+    VideoShare {
+        #[serde(default)]
+        enabled: bool,
+    },
 }
 
 /// One running-app candidate for the suppression-list picker. The
@@ -932,8 +941,15 @@ pub enum FrontendRequest {
     /// `VideoOffer` from it (and tears the channel down on `false`).
     /// State changes echo back via [`FrontendEvent::VideoState`]; the
     /// daemon's `[video] enabled` config on the *sharing* side remains
-    /// the master switch.
+    /// the master switch ([`FrontendRequest::SetVideoEnabled`]).
     SetVideoView(ClientHandle, bool),
+    /// Toggle whether this machine shares its screen at all (the
+    /// sharing side's `[video] enabled` master switch, previously
+    /// config-only). The daemon binds/tears down the video listener
+    /// live, announces the offer to (or withdraws it from) every
+    /// established direct session, persists the choice to
+    /// config.toml, and echoes [`FrontendEvent::VideoShare`].
+    SetVideoEnabled(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -1072,6 +1088,35 @@ mod tests {
                 assert_eq!(width, 0);
             }
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn video_share_event_round_trip_and_defaults() {
+        let event = FrontendEvent::VideoShare { enabled: true };
+        let s = serde_json::to_string(&event).expect("encode");
+        assert_eq!(s, r#"{"VideoShare":{"enabled":true}}"#);
+        match serde_json::from_str::<FrontendEvent>(&s).expect("decode") {
+            FrontendEvent::VideoShare { enabled } => assert!(enabled),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+
+        // Older console JSON without the field must decode (the field
+        // is `#[serde(default)]`), mirroring `VideoState`'s leniency.
+        let decoded: FrontendEvent = serde_json::from_str(r#"{"VideoShare":{}}"#).expect("lenient");
+        match decoded {
+            FrontendEvent::VideoShare { enabled } => assert!(!enabled),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_request_set_video_enabled_wire_shape_is_pinned() {
+        let json = serde_json::to_string(&FrontendRequest::SetVideoEnabled(true)).unwrap();
+        assert_eq!(json, r#"{"SetVideoEnabled":true}"#);
+        match serde_json::from_str(&json).unwrap() {
+            FrontendRequest::SetVideoEnabled(enabled) => assert!(enabled),
+            other => panic!("wrong variant decoded: {other:?}"),
         }
     }
 

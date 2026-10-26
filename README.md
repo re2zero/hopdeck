@@ -722,6 +722,15 @@ The GPUI console can view the picture: a device's detail page has a
 socket (`mousehop-video.sock` next to the IPC socket) so the JSON state
 channel never carries pixels.
 
+The sharing side's master switch no longer requires editing config.toml:
+the settings page's 常规 tab has a 「画面共享」 switch that sends
+`SetVideoEnabled` over the IPC socket. The daemon binds/tears down the
+video listener live, announces the offer to (or withdraws it via
+`VideoStop` from) every established direct session, persists the choice
+to `[video] enabled`, and echoes the state as a `VideoShare` event so
+frontends stay in sync after reconnects. Geometry, source and port stay
+config-only.
+
 ## Detailed OS Support
 
 In order to use a device for sending events, an **input-capture** backend is required, while receiving events requires

@@ -821,6 +821,22 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// Toggle the sharing side's `[video] enabled` master switch
+    /// (frontend-initiated `SetVideoEnabled`). Only the flag moves:
+    /// the running listener is rebuilt by the service; geometry,
+    /// source and port stay whatever the section (or defaults) say.
+    pub fn set_video_enabled(&mut self, enabled: bool) {
+        if self.config_toml.is_none() {
+            self.config_toml = Some(Default::default());
+        }
+        self.config_toml
+            .as_mut()
+            .expect("config")
+            .video
+            .get_or_insert_with(Default::default)
+            .enabled = Some(enabled);
+    }
+
     /// path to certificate
     pub fn cert_path(&self) -> &Path {
         &self.cert_path
