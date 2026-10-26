@@ -999,6 +999,7 @@ impl Service {
                 if self.live_incoming.get(&addr) == Some(&session) {
                     self.live_incoming.remove(&addr);
                 }
+                self.refresh_incoming_flags();
                 // An input session died: stop streaming to whoever held the
                 // video channel, but keep the listener. Coarse by design
                 // (any disconnect ends all sends) — the next `Connected`
@@ -1073,6 +1074,7 @@ impl Service {
                 // Track the live session for mid-run video announces;
                 // a replacement session overwrites the stale entry.
                 self.live_incoming.insert(addr, session);
+                self.refresh_incoming_flags();
                 // Video announce (M3a). Reverse-mode sessions offer no
                 // inbound path for the peer to dial our video port, so they
                 // stay silent — D34: v1 ships video for direct topology only.
@@ -2002,6 +2004,24 @@ impl Service {
     fn update_enter_hook(&mut self, handle: ClientHandle, enter_hook: Option<String>) {
         self.client_manager.set_enter_hook(handle, enter_hook);
         self.broadcast_client(handle);
+    }
+
+    /// Recompute [`hopdeck_ipc::ClientState::incoming`] from the live
+    /// inbound session table. `alive` only covers the outbound
+    /// transport, so a peer that dialed us must still render as
+    /// connected while our own dial is down or absent.
+    fn refresh_incoming_flags(&mut self) {
+        let live_ips: HashSet<IpAddr> = self.live_incoming.keys().map(|addr| addr.ip()).collect();
+        for (handle, config, state) in self.client_manager.get_client_states() {
+            let incoming = config
+                .fix_ips
+                .iter()
+                .chain(state.ips.iter())
+                .any(|ip| live_ips.contains(ip));
+            if self.client_manager.set_incoming(handle, incoming) {
+                self.broadcast_client(handle);
+            }
+        }
     }
 
     fn broadcast_client(&mut self, handle: ClientHandle) {

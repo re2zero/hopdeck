@@ -326,6 +326,19 @@ impl ClientManager {
         }
     }
 
+    /// Track a live inbound session for display. Returns `true` when
+    /// the value changed, so callers only re-broadcast on real moves.
+    pub(crate) fn set_incoming(&self, handle: ClientHandle, incoming: bool) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((_, s)) if s.incoming != incoming => {
+                s.incoming = incoming;
+                self.client_states_dirty.set(true);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn set_peer_commit(&self, handle: ClientHandle, commit: Option<[u8; 8]>) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
             if s.peer_commit != commit {
@@ -723,6 +736,13 @@ mod tests {
         assert!(cm.take_client_states_dirty());
         cm.set_peer_fingerprint(handle, Some("fp".into()));
         assert!(cm.take_client_states_dirty());
+        // Inbound liveness is display state, but it must reach the
+        // frontend through the same dirty/broadcast path.
+        assert!(cm.set_incoming(handle, true));
+        assert!(cm.take_client_states_dirty());
+        assert!(!cm.take_client_states_dirty());
+        assert!(!cm.set_incoming(handle, true));
+        assert!(!cm.take_client_states_dirty());
     }
 
     fn ip(a: u8) -> IpAddr {

@@ -194,7 +194,9 @@ impl DeviceEntry {
     }
 
     fn online(&self) -> bool {
-        self.state.alive
+        // `alive` is the outbound transport only; an inbound session
+        // means the peer is connected to us and can send input.
+        self.state.alive || self.state.incoming
     }
 
     /// Whether the direct-connect query matches this device (hostname
@@ -392,8 +394,13 @@ impl Console {
             FrontendEvent::State(handle, config, state) => {
                 // Alive transitions are journaled from the pre-update
                 // snapshot; the borrow of `entry_mut` can't span it.
+                // `online()` includes inbound sessions, so a peer whose
+                // own dial drops but remains connected to us stays
+                // online without a spurious 离线 entry.
                 let transition = self.entry(handle).and_then(|entry| {
-                    (entry.state.alive != state.alive).then(|| (entry.name(), state.alive))
+                    let was_online = entry.online();
+                    let now_online = state.alive || state.incoming;
+                    (was_online != now_online).then(|| (entry.name(), now_online))
                 });
                 if let Some(entry) = self.entry_mut(handle) {
                     entry.config = config;
@@ -1396,6 +1403,19 @@ fn needs_own_window_controls(client_decorated: bool) -> bool {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn incoming_session_renders_as_online() {
+        let state = ClientState {
+            incoming: true,
+            ..Default::default()
+        };
+        let entry = DeviceEntry::new(0, ClientConfig::default(), state);
+        assert!(entry.online());
+
+        let idle = DeviceEntry::new(0, ClientConfig::default(), ClientState::default());
+        assert!(!idle.online());
+    }
 
     #[test]
     fn client_decorations_defer_window_controls_to_title_bar() {

@@ -502,6 +502,13 @@ pub struct ClientState {
     pub active_addr: Option<SocketAddr>,
     /// tracks whether or not the client is available for emulation
     pub alive: bool,
+    /// `true` while the peer holds a live inbound (emulation-side)
+    /// session to us. [`Self::alive`] only covers the outbound
+    /// transport, so a frontend that renders `alive` alone labels a
+    /// peer that dialed us as offline even though its input session
+    /// is up. Display state only; it never routes events.
+    #[serde(default)]
+    pub incoming: bool,
     /// ips from dns
     pub dns_ips: Vec<IpAddr>,
     /// Addresses learned from the peer's mDNS service advertisement
@@ -859,6 +866,25 @@ pub fn default_socket_path() -> Result<PathBuf, SocketPathError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_state_incoming_is_forward_compatible() {
+        // Older daemons omit the field; newer frontends must decode
+        // them as "no inbound session".
+        let legacy = r#"{"active":false,"active_addr":null,"alive":true,
+            "dns_ips":[],"discovered_ips":[],"ips":[],"interfaces":{},
+            "active_lock":null,"latencies":{},"has_pressed_keys":false,
+            "resolving":false,"peer_commit":null,"peer_fingerprint":null}"#;
+        let state: ClientState = serde_json::from_str(legacy).expect("decode legacy state");
+        assert!(!state.incoming);
+
+        let encoded = serde_json::to_value(ClientState {
+            incoming: true,
+            ..Default::default()
+        })
+        .expect("encode state");
+        assert_eq!(encoded["incoming"], true);
+    }
 
     #[test]
     fn app_ident_matches_within_variant_case_insensitive() {
