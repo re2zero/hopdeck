@@ -1,23 +1,23 @@
-# Maintainer: Jon Kinney
+# Maintainer: re2zero
 #
-# Source of truth for the AUR `mousehop-git` package — tracks main.
+# Source of truth for the AUR `hopdeck-git` package — tracks main.
 # The pkgver() function regenerates the version from `git describe`
 # at build time; the static pkgver= line below is metadata only (for
 # AUR display). aur-publish.yml bumps that line on each release.
-pkgname=mousehop-git
-_pkgname=mousehop
+pkgname=hopdeck-git
+_pkgname=hopdeck
 pkgver=0.11.2.r0.gabcdef
 pkgrel=1
 pkgdesc='Software KVM Switch / mouse & keyboard sharing software for Local Area Networks (latest main)'
 arch=('x86_64' 'aarch64')
-url='https://github.com/jondkinney/mousehop'
+url='https://github.com/re2zero/hopdeck'
 license=('GPL-3.0-or-later')
 depends=('libadwaita' 'gtk4' 'libx11' 'libxtst' 'glib2' 'glibc' 'gcc-libs' 'hicolor-icon-theme')
 makedepends=('rust' 'git')
 options=('!lto')
 provides=("$_pkgname=$pkgver")
 conflicts=("$_pkgname" "$_pkgname-bin")
-source=("$_pkgname::git+https://github.com/jondkinney/$_pkgname.git")
+source=("$_pkgname::git+https://github.com/re2zero/$_pkgname.git")
 sha256sums=('SKIP')
 
 pkgver() {
@@ -44,11 +44,11 @@ build() {
 
 package() {
   cd "$_pkgname"
-  install -Dm755 target/release/mousehop "$pkgdir/usr/bin/mousehop"
-  install -Dm644 mousehop/com.mousehop.Mousehop.desktop \
-    "$pkgdir/usr/share/applications/com.mousehop.Mousehop.desktop"
-  install -Dm644 mousehop-gtk/resources/com.mousehop.Mousehop.svg \
-    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.mousehop.Mousehop.svg"
+  install -Dm755 target/release/hopdeck "$pkgdir/usr/bin/hopdeck"
+  install -Dm644 apps/hopdeck/com.hopdeck.HopDeck.desktop \
+    "$pkgdir/usr/share/applications/com.hopdeck.HopDeck.desktop"
+  install -Dm644 crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.hopdeck.HopDeck.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
 }

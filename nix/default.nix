@@ -14,11 +14,11 @@
   fontconfig,
 }:
 let
-  # The workspace root is virtual (no [package]); the mousehop
-  # binary crate lives in mousehop/ as a workspace member. Pull the
+  # The workspace root is virtual (no [package]); the hopdeck
+  # binary crate lives in apps/hopdeck/ as a workspace member. Pull the
   # package name from there and the version from the workspace root,
   # which still owns [workspace.package].
-  appCargoToml = fromTOML (builtins.readFile ../mousehop/Cargo.toml);
+  appCargoToml = fromTOML (builtins.readFile ../apps/hopdeck/Cargo.toml);
   rootCargoToml = fromTOML (builtins.readFile ../Cargo.toml);
   pname = appCargoToml.package.name;
   version = rootCargoToml.workspace.package.version;
@@ -58,14 +58,14 @@ rustPlatform.buildRustPackage {
   RUST_BACKTRACE = "full";
 
   postInstall = ''
-    install -Dm444 mousehop/*.desktop -t $out/share/applications
-    install -Dm444 mousehop-gtk/resources/*.svg -t $out/share/icons/hicolor/scalable/apps
+    install -Dm444 apps/hopdeck/*.desktop -t $out/share/applications
+    install -Dm444 crates/hopdeck-gtk/resources/*.svg -t $out/share/icons/hicolor/scalable/apps
   '';
 
   meta = with lib; {
-    description = "Mousehop is a mouse and keyboard sharing software";
+    description = "HopDeck is a mouse and keyboard sharing software";
     longDescription = ''
-      Mousehop is a mouse and keyboard sharing software similar to universal-control on Apple devices. It allows for using multiple pcs with a single set of mouse and keyboard. This is also known as a Software KVM switch.
+      HopDeck is a mouse and keyboard sharing software similar to universal-control on Apple devices. It allows for using multiple pcs with a single set of mouse and keyboard. This is also known as a Software KVM switch.
       The primary target is Wayland on Linux but Windows and MacOS and Linux on Xorg have partial support as well (see below for more details).
     '';
     mainProgram = pname;

@@ -38,16 +38,16 @@ jobs:
       run: cargo build --release
     - name: Stage tarball contents
       # Bundles the binary with the desktop file, app icon, LICENSE,
-      # and NOTICE so the mousehop-bin AUR PKGBUILD (and other distro
+      # and NOTICE so the hopdeck-bin AUR PKGBUILD (and other distro
       # packagers) can install everything from one tarball.
       run: |
         TAG="${{ github.event.release.tag_name || inputs.tag }}"
         ver="${TAG#v}"
-        stage="mousehop-${ver}-x86_64"
+        stage="hopdeck-${ver}-x86_64"
         mkdir "$stage"
-        cp target/release/mousehop \
-           mousehop/com.mousehop.Mousehop.desktop \
-           mousehop-gtk/resources/com.mousehop.Mousehop.svg \
+        cp target/release/hopdeck \
+           apps/hopdeck/com.hopdeck.HopDeck.desktop \
+           crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg \
            LICENSE NOTICE \
            "$stage/"
         tar -czf "${stage}.tar.gz" "$stage"
@@ -55,7 +55,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      run: gh release upload "$TAG" mousehop-*-x86_64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+      run: gh release upload "$TAG" hopdeck-*-x86_64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
 
   linux-arm64-release-build:
     runs-on: ubuntu-22.04-arm
@@ -73,11 +73,11 @@ jobs:
       run: |
         TAG="${{ github.event.release.tag_name || inputs.tag }}"
         ver="${TAG#v}"
-        stage="mousehop-${ver}-aarch64"
+        stage="hopdeck-${ver}-aarch64"
         mkdir "$stage"
-        cp target/release/mousehop \
-           mousehop/com.mousehop.Mousehop.desktop \
-           mousehop-gtk/resources/com.mousehop.Mousehop.svg \
+        cp target/release/hopdeck \
+           apps/hopdeck/com.hopdeck.HopDeck.desktop \
+           crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg \
            LICENSE NOTICE \
            "$stage/"
         tar -czf "${stage}.tar.gz" "$stage"
@@ -85,7 +85,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      run: gh release upload "$TAG" mousehop-*-aarch64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+      run: gh release upload "$TAG" hopdeck-*-aarch64.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
 
   windows-release-build:
     runs-on: windows-latest
@@ -135,15 +135,15 @@ jobs:
       run: cargo build --release
     - name: Create Archive
       run: |
-        mkdir "mousehop-windows"
-        Get-Childitem -Path "C:\\gtk-build\\gtk\\x64\\release\\bin\\*.dll" -File -Recurse | Copy-Item -Destination "mousehop-windows"
-        Copy-Item -Path "target\release\mousehop.exe" -Destination "mousehop-windows"
-        Compress-Archive -Path "mousehop-windows\*" -DestinationPath mousehop-windows-x86_64.zip
+        mkdir "hopdeck-windows"
+        Get-Childitem -Path "C:\\gtk-build\\gtk\\x64\\release\\bin\\*.dll" -File -Recurse | Copy-Item -Destination "hopdeck-windows"
+        Copy-Item -Path "target\release\hopdeck.exe" -Destination "hopdeck-windows"
+        Compress-Archive -Path "hopdeck-windows\*" -DestinationPath hopdeck-windows-x86_64.zip
     - name: Attach archive to the release
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      run: gh release upload "$env:TAG" mousehop-windows-x86_64.zip --clobber --repo "$env:GITHUB_REPOSITORY"
+      run: gh release upload "$env:TAG" hopdeck-windows-x86_64.zip --clobber --repo "$env:GITHUB_REPOSITORY"
 
   macos-release-build:
     runs-on: macos-15-intel
@@ -170,20 +170,20 @@ jobs:
     - name: Release Build
       run: |
         cargo build --release
-        cp target/release/mousehop mousehop-macos-intel
+        cp target/release/hopdeck hopdeck-macos-intel
     - name: Make icns
       run: scripts/makeicns.sh
     - name: Install cargo bundle
       run: cargo install cargo-bundle
     - name: Bundle
-      # Must run from mousehop/ so cargo-bundle's icon / resources /
+      # Must run from apps/hopdeck/ so cargo-bundle's icon / resources /
       # osx_info_plist_exts globs resolve against the manifest dir.
       # The globs are evaluated from CWD (not the manifest), so running
       # from the workspace root silently drops the icon, the menu-bar
       # template PNG, and the LSUIElement / TCC usage-description plist.
       run: |
-        (cd mousehop && cargo bundle --release)
-        scripts/copy-macos-dylib.sh "target/release/bundle/osx/Mousehop.app/Contents/MacOS/mousehop"
+        (cd apps/hopdeck && cargo bundle --release)
+        scripts/copy-macos-dylib.sh "target/release/bundle/osx/HopDeck.app/Contents/MacOS/hopdeck"
     - name: Sign, notarize & package DMG
       env:
         # sign-and-notarize.sh consumes these; it no-ops to ad-hoc
@@ -193,17 +193,17 @@ jobs:
         MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
         MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
-        MOUSEHOP_SIGNING_PASSWORD: ${{ secrets.MOUSEHOP_SIGNING_PASSWORD }}
+        HOPDECK_SIGNING_PASSWORD: ${{ secrets.HOPDECK_SIGNING_PASSWORD }}
       run: |
-        app="target/release/bundle/osx/Mousehop.app"
-        dmg="target/release/bundle/osx/mousehop-macos-intel.dmg"
+        app="target/release/bundle/osx/HopDeck.app"
+        dmg="target/release/bundle/osx/hopdeck-macos-intel.dmg"
         scripts/sign-and-notarize.sh --app "$app"
         create-dmg \
-          --volname "Mousehop" \
+          --volname "HopDeck" \
           --window-pos 200 120 \
           --window-size 600 400 \
           --icon-size 96 \
-          --icon "Mousehop.app" 150 200 \
+          --icon "HopDeck.app" 150 200 \
           --app-drop-link 450 200 \
           --no-internet-enable \
           "$dmg" "$app"
@@ -212,7 +212,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      run: gh release upload "$TAG" target/release/bundle/osx/mousehop-macos-intel.dmg --clobber --repo "$GITHUB_REPOSITORY"
+      run: gh release upload "$TAG" target/release/bundle/osx/hopdeck-macos-intel.dmg --clobber --repo "$GITHUB_REPOSITORY"
 
   macos-arm64-release-build:
     runs-on: macos-15
@@ -239,20 +239,20 @@ jobs:
     - name: Release Build
       run: |
         cargo build --release
-        cp target/release/mousehop mousehop-macos-arm64
+        cp target/release/hopdeck hopdeck-macos-arm64
     - name: Make icns
       run: scripts/makeicns.sh
     - name: Install cargo bundle
       run: cargo install cargo-bundle
     - name: Bundle
-      # Must run from mousehop/ so cargo-bundle's icon / resources /
+      # Must run from apps/hopdeck/ so cargo-bundle's icon / resources /
       # osx_info_plist_exts globs resolve against the manifest dir.
       # The globs are evaluated from CWD (not the manifest), so running
       # from the workspace root silently drops the icon, the menu-bar
       # template PNG, and the LSUIElement / TCC usage-description plist.
       run: |
-        (cd mousehop && cargo bundle --release)
-        scripts/copy-macos-dylib.sh "target/release/bundle/osx/Mousehop.app/Contents/MacOS/mousehop"
+        (cd apps/hopdeck && cargo bundle --release)
+        scripts/copy-macos-dylib.sh "target/release/bundle/osx/HopDeck.app/Contents/MacOS/hopdeck"
     - name: Sign, notarize & package DMG
       env:
         # sign-and-notarize.sh consumes these; it no-ops to ad-hoc
@@ -262,17 +262,17 @@ jobs:
         MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
         MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
-        MOUSEHOP_SIGNING_PASSWORD: ${{ secrets.MOUSEHOP_SIGNING_PASSWORD }}
+        HOPDECK_SIGNING_PASSWORD: ${{ secrets.HOPDECK_SIGNING_PASSWORD }}
       run: |
-        app="target/release/bundle/osx/Mousehop.app"
-        dmg="target/release/bundle/osx/mousehop-macos-arm64.dmg"
+        app="target/release/bundle/osx/HopDeck.app"
+        dmg="target/release/bundle/osx/hopdeck-macos-arm64.dmg"
         scripts/sign-and-notarize.sh --app "$app"
         create-dmg \
-          --volname "Mousehop" \
+          --volname "HopDeck" \
           --window-pos 200 120 \
           --window-size 600 400 \
           --icon-size 96 \
-          --icon "Mousehop.app" 150 200 \
+          --icon "HopDeck.app" 150 200 \
           --app-drop-link 450 200 \
           --no-internet-enable \
           "$dmg" "$app"
@@ -281,7 +281,7 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      run: gh release upload "$TAG" target/release/bundle/osx/mousehop-macos-arm64.dmg --clobber --repo "$GITHUB_REPOSITORY"
+      run: gh release upload "$TAG" target/release/bundle/osx/hopdeck-macos-arm64.dmg --clobber --repo "$GITHUB_REPOSITORY"
 
   # Flatpak bundle build + upload now lives in release-flatpak.yml,
   # gated on the same `release: published` trigger. The split lets a

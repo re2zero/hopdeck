@@ -3908,6 +3908,210 @@ dependencies = [
 ]
 
 [[package]]
+name = "hopdeck"
+version = "0.17.1"
+dependencies = [
+ "clap 4.6.0",
+ "core-graphics 0.25.0",
+ "env_logger",
+ "futures",
+ "getrandom 0.3.4",
+ "hopdeck-cli",
+ "hopdeck-gtk",
+ "hopdeck-input-capture",
+ "hopdeck-input-emulation",
+ "hopdeck-input-event",
+ "hopdeck-ipc",
+ "hopdeck-proto",
+ "hopdeck-video",
+ "hostname",
+ "if-addrs 0.13.4",
+ "if-watch",
+ "libc",
+ "local-channel",
+ "log",
+ "mdns-sd",
+ "netdev",
+ "notify",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "shadow-rs",
+ "slab",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "webrtc-dtls",
+ "webrtc-util",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "hopdeck-cli"
+version = "0.17.1"
+dependencies = [
+ "clap 4.6.0",
+ "futures",
+ "hopdeck-ipc",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "hopdeck-console"
+version = "0.17.1"
+dependencies = [
+ "futures",
+ "gpui-base",
+ "gpui-component",
+ "gpui-kit",
+ "gpui-pre",
+ "hopdeck-ipc",
+ "hostname",
+ "image",
+ "log",
+ "time",
+ "x11rb",
+]
+
+[[package]]
+name = "hopdeck-gtk"
+version = "0.17.1"
+dependencies = [
+ "async-channel",
+ "glib-build-tools",
+ "gtk4",
+ "hopdeck-input-capture",
+ "hopdeck-input-event",
+ "hopdeck-ipc",
+ "hostname",
+ "ksni",
+ "libadwaita",
+ "log",
+ "thiserror 2.0.18",
+ "windows 0.61.3",
+]
+
+[[package]]
+name = "hopdeck-input-capture"
+version = "0.17.1"
+dependencies = [
+ "arboard",
+ "ashpd",
+ "async-trait",
+ "bitflags 2.13.2",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics 0.25.0",
+ "futures",
+ "futures-core",
+ "hopdeck-input-event",
+ "keycode",
+ "libc",
+ "log",
+ "memmap",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "once_cell",
+ "reis",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "windows 0.61.3",
+ "x11",
+ "x11rb",
+]
+
+[[package]]
+name = "hopdeck-input-emulation"
+version = "0.17.1"
+dependencies = [
+ "arboard",
+ "ashpd",
+ "async-trait",
+ "bitflags 2.13.2",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
+ "core-graphics 0.25.0",
+ "futures",
+ "hopdeck-input-event",
+ "keycode",
+ "log",
+ "once_cell",
+ "reis",
+ "thiserror 2.0.18",
+ "tokio",
+ "usbip",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
+ "windows 0.61.3",
+ "x11",
+]
+
+[[package]]
+name = "hopdeck-input-event"
+version = "0.17.1"
+dependencies = [
+ "futures-core",
+ "log",
+ "num_enum",
+ "reis",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hopdeck-ipc"
+version = "0.17.1"
+dependencies = [
+ "futures",
+ "hopdeck-input-event",
+ "log",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
+name = "hopdeck-proto"
+version = "0.17.1"
+dependencies = [
+ "hopdeck-input-event",
+ "num_enum",
+ "paste",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hopdeck-video"
+version = "0.17.1"
+dependencies = [
+ "ashpd",
+ "futures",
+ "futures-core",
+ "log",
+ "openh264",
+ "pipewire",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "hostname"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5139,211 +5343,6 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "mousehop"
-version = "0.17.1"
-dependencies = [
- "clap 4.6.0",
- "core-graphics 0.25.0",
- "env_logger",
- "futures",
- "getrandom 0.3.4",
- "hostname",
- "if-addrs 0.13.4",
- "if-watch",
- "libc",
- "local-channel",
- "log",
- "mdns-sd",
- "mousehop-cli",
- "mousehop-gtk",
- "mousehop-input-capture",
- "mousehop-input-emulation",
- "mousehop-input-event",
- "mousehop-ipc",
- "mousehop-proto",
- "mousehop-video",
- "netdev",
- "notify",
- "rcgen",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "shadow-rs",
- "slab",
- "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
- "tokio-util",
- "toml 0.8.23",
- "toml_edit 0.22.27",
- "webrtc-dtls",
- "webrtc-util",
- "windows 0.61.3",
-]
-
-[[package]]
-name = "mousehop-cli"
-version = "0.17.1"
-dependencies = [
- "clap 4.6.0",
- "futures",
- "mousehop-ipc",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "mousehop-console"
-version = "0.17.1"
-dependencies = [
- "futures",
- "gpui-base",
- "gpui-component",
- "gpui-kit",
- "gpui-pre",
- "hostname",
- "image",
- "log",
- "mousehop-ipc",
- "time",
- "x11rb",
-]
-
-[[package]]
-name = "mousehop-gtk"
-version = "0.17.1"
-dependencies = [
- "async-channel",
- "glib-build-tools",
- "gtk4",
- "hostname",
- "ksni",
- "libadwaita",
- "log",
- "mousehop-input-capture",
- "mousehop-input-event",
- "mousehop-ipc",
- "thiserror 2.0.18",
- "windows 0.61.3",
-]
-
-[[package]]
-name = "mousehop-input-capture"
-version = "0.17.1"
-dependencies = [
- "arboard",
- "ashpd",
- "async-trait",
- "bitflags 2.13.2",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "core-graphics 0.25.0",
- "futures",
- "futures-core",
- "keycode",
- "libc",
- "log",
- "memmap",
- "mousehop-input-event",
- "mousehop-ipc",
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "once_cell",
- "reis",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-wlr",
- "windows 0.61.3",
- "x11",
- "x11rb",
-]
-
-[[package]]
-name = "mousehop-input-emulation"
-version = "0.17.1"
-dependencies = [
- "arboard",
- "ashpd",
- "async-trait",
- "bitflags 2.13.2",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "core-graphics 0.25.0",
- "futures",
- "keycode",
- "log",
- "mousehop-input-event",
- "once_cell",
- "reis",
- "thiserror 2.0.18",
- "tokio",
- "usbip",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-misc",
- "wayland-protocols-wlr",
- "windows 0.61.3",
- "x11",
-]
-
-[[package]]
-name = "mousehop-input-event"
-version = "0.17.1"
-dependencies = [
- "futures-core",
- "log",
- "num_enum",
- "reis",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mousehop-ipc"
-version = "0.17.1"
-dependencies = [
- "futures",
- "log",
- "mousehop-input-event",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
-name = "mousehop-proto"
-version = "0.17.1"
-dependencies = [
- "mousehop-input-event",
- "num_enum",
- "paste",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "mousehop-video"
-version = "0.17.1"
-dependencies = [
- "ashpd",
- "futures",
- "futures-core",
- "log",
- "openh264",
- "pipewire",
- "thiserror 2.0.18",
- "tokio",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 set -eu
 
 homebrew_path=""
-exec_path="target/debug/bundle/osx/Mousehop.app/Contents/MacOS/mousehop"
+exec_path="target/debug/bundle/osx/HopDeck.app/Contents/MacOS/hopdeck"
 
 usage() {
     cat <<EOF
@@ -163,14 +163,20 @@ copy_runtime_data
 
 # cargo-bundle preserves the source path under Contents/Resources and
 # rewrites any `..` segment to `_up_`, so a resource at
-# `../target/menubar-template.png` lands at
-# `Resources/_up_/target/menubar-template.png`. NSBundle
+# `../../target/menubar-template.png` lands at
+# `Resources/_up_/_up_/target/menubar-template.png`. NSBundle
 # pathForResource: only searches the Resources root (not arbitrary
-# subdirs), so flatten the file back to the root.
-if [ -f "$resources_path/_up_/target/menubar-template.png" ]; then
-  mv "$resources_path/_up_/target/menubar-template.png" "$resources_path/menubar-template.png"
-  rmdir "$resources_path/_up_/target" "$resources_path/_up_" 2>/dev/null || true
-fi
+# subdirs), so flatten the file back to the root. The single-`_up_`
+# form is kept for bundles produced before the apps/ move.
+for template in \
+  "$resources_path/_up_/_up_/target/menubar-template.png" \
+  "$resources_path/_up_/target/menubar-template.png"; do
+  if [ -f "$template" ]; then
+    mv "$template" "$resources_path/menubar-template.png"
+    find "$resources_path" -type d -empty -name _up_ -delete 2>/dev/null || true
+    break
+  fi
+done
 
 # Ensure the main executable has our Frameworks path in its RPATH
 if ! otool -l "$exec_path" | grep -q "@executable_path/../Frameworks"; then

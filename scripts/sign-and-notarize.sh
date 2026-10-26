@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Sign (and, for a .dmg, notarize + staple) a macOS artifact for Mousehop.
+# Sign (and, for a .dmg, notarize + staple) a macOS artifact for HopDeck.
 #
 # Designed to run on a GitHub Actions macos runner. A throwaway keychain
 # holds the Developer ID Application cert for the duration of the job
 # and is torn down on exit (success or failure).
 #
 # Usage:
-#   sign-and-notarize.sh --app target/release/bundle/osx/Mousehop.app
+#   sign-and-notarize.sh --app target/release/bundle/osx/HopDeck.app
 #       Code-sign the bundle and every nested dylib (Developer ID +
 #       hardened runtime). No notarization here — the .app is notarized
 #       as part of the DMG.
-#   sign-and-notarize.sh --dmg target/release/bundle/osx/mousehop-macos-arm64.dmg
+#   sign-and-notarize.sh --dmg target/release/bundle/osx/hopdeck-macos-arm64.dmg
 #       Sign, notarize (Apple inspects the nested .app too), and
 #       staple the DMG. One notary round-trip covers everything.
 #
@@ -21,7 +21,7 @@
 #   MACOS_CERTIFICATE_PASSWORD     password used when exporting the .p12
 #   MACOS_NOTARY_APPLE_ID          Apple ID email
 #   MACOS_NOTARY_TEAM_ID           10-char team ID
-#   MOUSEHOP_SIGNING_PASSWORD      app-specific password from
+#   HOPDECK_SIGNING_PASSWORD      app-specific password from
 #                                  appleid.apple.com, used by notarytool
 #
 # Local development: leave MACOS_CERTIFICATE_P12_BASE64 unset and this
@@ -65,13 +65,13 @@ fi
 : "${MACOS_CERTIFICATE_PASSWORD:?required when MACOS_CERTIFICATE_P12_BASE64 is set}"
 : "${MACOS_NOTARY_APPLE_ID:?required for notarytool submission}"
 : "${MACOS_NOTARY_TEAM_ID:?required for notarytool submission}"
-: "${MOUSEHOP_SIGNING_PASSWORD:?app-specific password required for notarytool}"
+: "${HOPDECK_SIGNING_PASSWORD:?app-specific password required for notarytool}"
 
 # RUNNER_TEMP is set on GitHub Actions; fall back to a mktemp dir so
 # the script also runs cleanly if invoked outside CI for testing.
 WORK_DIR="${RUNNER_TEMP:-$(mktemp -d)}"
-KEYCHAIN_PATH="$WORK_DIR/mousehop-signing.keychain-db"
-P12_PATH="$WORK_DIR/mousehop-signing.p12"
+KEYCHAIN_PATH="$WORK_DIR/hopdeck-signing.keychain-db"
+P12_PATH="$WORK_DIR/hopdeck-signing.p12"
 KEYCHAIN_PASSWORD="$(openssl rand -hex 32)"
 
 # Snapshot the existing keychain search list so we can restore it on
@@ -129,7 +129,7 @@ if [[ -z "$IDENTITY" ]]; then
 fi
 echo "==> Signing identity: $IDENTITY"
 
-# No --entitlements: Mousehop needs none (Accessibility / Input
+# No --entitlements: HopDeck needs none (Accessibility / Input
 # Monitoring go through runtime TCC prompts, not entitlements).
 # Add the flag here if that ever changes.
 
@@ -141,7 +141,7 @@ echo "==> Signing identity: $IDENTITY"
 # Apple's online ticket lookup on first launch.
 if [[ "$KIND" == "app" ]]; then
     # Inside-out: nested executables/frameworks/dylibs first, then the
-    # outer wrapper. Mousehop's bundle carries the GTK / libadwaita
+    # outer wrapper. HopDeck's bundle carries the GTK / libadwaita
     # dylibs under Contents/Frameworks (copied in by
     # copy-macos-dylib.sh), so this loop signs each of them before the
     # wrapper seals the bundle.
@@ -165,7 +165,7 @@ if [[ "$KIND" == "app" ]]; then
     codesign --force --options runtime --timestamp \
         --keychain "$KEYCHAIN_PATH" \
         --sign "$IDENTITY" \
-        "$TARGET/Contents/MacOS/mousehop"
+        "$TARGET/Contents/MacOS/hopdeck"
 
     echo "==> Signing app bundle"
     codesign --force --options runtime --timestamp \
@@ -199,7 +199,7 @@ notary() {
     xcrun notarytool "$@" \
         --apple-id "$MACOS_NOTARY_APPLE_ID" \
         --team-id "$MACOS_NOTARY_TEAM_ID" \
-        --password "$MOUSEHOP_SIGNING_PASSWORD"
+        --password "$HOPDECK_SIGNING_PASSWORD"
 }
 
 echo "==> Submitting to Apple notary service: $TARGET"

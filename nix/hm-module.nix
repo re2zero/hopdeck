@@ -5,18 +5,18 @@ self: {
   ...
 }:
 with lib; let
-  cfg = config.programs.mousehop;
+  cfg = config.programs.hopdeck;
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
   tomlFormat = pkgs.formats.toml {};
 in {
-  options.programs.mousehop = with types; {
-    enable = mkEnableOption "Whether or not to enable mousehop.";
+  options.programs.hopdeck = with types; {
+    enable = mkEnableOption "Whether or not to enable hopdeck.";
     package = mkOption {
       type = with types; nullOr package;
       default = defaultPackage;
-      defaultText = literalExpression "inputs.mousehop.packages.${pkgs.stdenv.hostPlatform.system}.default";
+      defaultText = literalExpression "inputs.hopdeck.packages.${pkgs.stdenv.hostPlatform.system}.default";
       description = ''
-        The mousehop package to use.
+        The hopdeck package to use.
 
         By default, this option will use the `packages.default` as exposed by this flake.
       '';
@@ -24,35 +24,35 @@ in {
     systemd = mkOption {
       type = types.bool;
       default = pkgs.stdenv.isLinux;
-      description = "Whether to enable to systemd service for mousehop on linux.";
+      description = "Whether to enable to systemd service for hopdeck on linux.";
     };
     launchd = mkOption {
       type = types.bool;
       default = pkgs.stdenv.isDarwin;
-      description = "Whether to enable to launchd service for mousehop on macOS.";
+      description = "Whether to enable to launchd service for hopdeck on macOS.";
     };
     settings = lib.mkOption {
       inherit (tomlFormat) type;
       default = {};
       example = builtins.fromTOML (builtins.readFile (self + /config.toml));
       description = ''
-        Optional configuration written to {file}`$XDG_CONFIG_HOME/mousehop/config.toml`.
+        Optional configuration written to {file}`$XDG_CONFIG_HOME/hopdeck/config.toml`.
 
-        See <https://github.com/jondkinney/mousehop/> for
+        See <https://github.com/re2zero/hopdeck/> for
         available options and documentation.
       '';
     };
   };
 
   config = mkIf cfg.enable {
-    systemd.user.services.mousehop = lib.mkIf cfg.systemd {
+    systemd.user.services.hopdeck = lib.mkIf cfg.systemd {
       Unit = {
-        Description = "Systemd service for Mousehop";
+        Description = "Systemd service for HopDeck";
         Requires = ["graphical-session.target"];
       };
       Service = {
         Type = "simple";
-        ExecStart = "${cfg.package}/bin/mousehop daemon";
+        ExecStart = "${cfg.package}/bin/hopdeck daemon";
       };
       Install.WantedBy = [
         (lib.mkIf config.wayland.windowManager.hyprland.systemd.enable "hyprland-session.target")
@@ -60,11 +60,11 @@ in {
       ];
     };
 
-    launchd.agents.mousehop = lib.mkIf cfg.launchd {
+    launchd.agents.hopdeck = lib.mkIf cfg.launchd {
       enable = true;
       config = {
         ProgramArguments = [
-          "${cfg.package}/bin/mousehop"
+          "${cfg.package}/bin/hopdeck"
           "daemon"
         ];
         KeepAlive = true;
@@ -75,7 +75,7 @@ in {
       cfg.package
     ];
 
-    xdg.configFile."mousehop/config.toml" = lib.mkIf (cfg.settings != {}) {
+    xdg.configFile."hopdeck/config.toml" = lib.mkIf (cfg.settings != {}) {
       source = tomlFormat.generate "config.toml" cfg.settings;
     };
   };

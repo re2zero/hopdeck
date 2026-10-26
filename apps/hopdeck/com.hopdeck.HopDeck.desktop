@@ -1,0 +1,14 @@
+[Desktop Entry]
+Categories=Utility;
+Comment[en_US]=Mouse & Keyboard sharing via LAN
+Comment=Mouse & Keyboard sharing via LAN
+Comment[zh_CN]=在局域网内共享鼠标、键盘与剪贴板
+Comment[de_DE]=Maus- und Tastaturfreigabe über LAN
+Exec=hopdeck
+Icon=com.hopdeck.HopDeck
+Name[en_US]=HopDeck
+Name=HopDeck
+Name[zh_CN]=桌联
+StartupNotify=true
+Terminal=false
+Type=Application

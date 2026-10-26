@@ -1,0 +1,36 @@
+[package]
+name = "hopdeck-video"
+description = "video pipeline for hopdeck: capture, codec, transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+log = "0.4.22"
+openh264 = "0.9.9"
+thiserror = "2.0.0"
+tokio = { version = "1.32.0", default-features = false, features = ["time", "sync"] }
+futures-core = "0.3.30"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Same declaration shape as input-capture/input-emulation: the async-io/tokio
+# ashpd features are mutually exclusive, and this workspace standardizes on
+# `tokio` (D18 — the console pulls ashpd with async-io via gpui, so daemon and
+# console must never be built in one cargo invocation).
+ashpd = { version = "0.13.9", default-features = false, features = [
+    "screencast",
+    "tokio",
+], optional = true }
+pipewire = { version = "0.10.1", optional = true }
+
+[features]
+# xdg-desktop-portal ScreenCast capture (Linux). The portal dialog and
+# PipeWire pump cannot run in CI (Xvfb has no portal); everything else in
+# this crate is testable headless.
+portal = ["dep:ashpd", "dep:pipewire"]
+
+[dev-dependencies]
+futures = "0.3.28"
+# `test-util` drives the paused-clock assertions in the portal pacing tests.
+tokio = { version = "1.32.0", features = ["macros", "rt", "test-util"] }

@@ -34,17 +34,17 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - uses: cachix/cachix-action@v16
         with:
-          name: mousehop
+          name: hopdeck
           authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
 
-      - name: Build mousehop (x86_64-linux)
+      - name: Build hopdeck (x86_64-linux)
         if: matrix.os == 'ubuntu-latest'
-        run: nix build --print-build-logs --show-trace .#packages.x86_64-linux.mousehop
+        run: nix build --print-build-logs --show-trace .#packages.x86_64-linux.hopdeck
 
-      - name: Build mousehop (x86_64-darwin)
+      - name: Build hopdeck (x86_64-darwin)
         if: matrix.os == 'macos-15-intel'
-        run: nix build --print-build-logs --show-trace .#packages.x86_64-darwin.mousehop
+        run: nix build --print-build-logs --show-trace .#packages.x86_64-darwin.hopdeck
 
-      - name: Build mousehop (aarch64-darwin)
+      - name: Build hopdeck (aarch64-darwin)
         if: matrix.os == 'macos-latest'
-        run: nix build --print-build-logs --show-trace .#packages.aarch64-darwin.mousehop
+        run: nix build --print-build-logs --show-trace .#packages.aarch64-darwin.hopdeck

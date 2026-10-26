@@ -1,0 +1,133 @@
+[package]
+name = "hopdeck"
+description = "Software KVM Switch / mouse & keyboard sharing software for Local Area Networks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+include = [
+    "src/**/*",
+    "build.rs",
+    # First-launch desktop install (see src/desktop_install.rs) embeds
+    # these two files into the binary via include_bytes! / include_str!,
+    # so they must ship in the published crate.
+    "com.hopdeck.HopDeck.desktop",
+    "assets/com.hopdeck.HopDeck.svg",
+]
+
+[build-dependencies]
+shadow-rs = "1.2.0"
+
+[dependencies]
+input-event = { workspace = true }
+input-emulation = { workspace = true, default-features = false }
+input-capture = { workspace = true, default-features = false }
+hopdeck-cli = { workspace = true }
+hopdeck-gtk = { workspace = true, optional = true }
+hopdeck-ipc = { workspace = true }
+hopdeck-proto = { workspace = true }
+hopdeck-video = { workspace = true, optional = true }
+shadow-rs = { version = "1.2.0", features = ["metadata"] }
+
+toml = "0.8"
+toml_edit = { version = "0.22", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4.20"
+env_logger = "0.11.3"
+serde_json = "1.0.107"
+tokio = { version = "1.32.0", features = [
+    "io-util",
+    "io-std",
+    "macros",
+    "net",
+    "process",
+    "rt",
+    "sync",
+    "signal",
+] }
+futures = "0.3.28"
+clap = { version = "4.4.11", features = ["derive"] }
+slab = "0.4.9"
+thiserror = "2.0.0"
+tokio-util = "0.7.11"
+local-channel = "0.1.5"
+webrtc-dtls = { version = "0.12.0", features = ["pem"] }
+webrtc-util = "0.11.0"
+rustls = { version = "0.23.12", default-features = false, features = [
+    "std",
+    "ring",
+] }
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+] }
+rcgen = "0.13.1"
+sha2 = "0.10.8"
+getrandom = "0.3"
+notify = "8.2.0"
+if-addrs = "0.13"
+if-watch = { version = "3.2", features = ["tokio"] }
+mdns-sd = "0.19"
+netdev = "0.43"
+hostname = "0.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.148"
+
+# Reattaching a GUI-subsystem build to the launching console (see
+# src/windows_console.rs). `Win32_Security` is what `CreateFileW` is
+# gated behind, not a capability we use directly.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = { version = "0.25.0", features = ["highsierra"] }
+
+[features]
+default = [
+    "gtk",
+    "layer_shell_capture",
+    "x11_capture",
+    "libei_capture",
+    "wlroots_emulation",
+    "libei_emulation",
+    "rdp_emulation",
+    "x11_emulation",
+    "usbip_emulation",
+]
+gtk = ["dep:hopdeck-gtk"]
+layer_shell_capture = ["input-capture/layer_shell"]
+x11_capture = ["input-capture/x11"]
+libei_capture = ["input-event/libei", "input-capture/libei"]
+libei_emulation = ["input-event/libei", "input-emulation/libei"]
+wlroots_emulation = ["input-emulation/wlroots"]
+x11_emulation = ["input-emulation/x11"]
+rdp_emulation = ["input-emulation/remote_desktop_portal"]
+usbip_emulation = ["input-emulation/usbip"]
+video = ["dep:hopdeck-video"]
+# xdg-desktop-portal ScreenCast capture source for the video channel
+# (Linux only, via hopdeck-video's `portal` feature). Out of default on
+# purpose: it drags in libpipewire and the picker dialog needs a real
+# desktop session anyway.
+video_portal = ["video", "hopdeck-video/portal"]
+
+[package.metadata.bundle]
+name = "HopDeck"
+# `target/` and `build-aux/` live at the workspace root. cargo-bundle
+# resolves these globs from the *current working directory* (not the
+# manifest), so the release workflow must `cd apps/hopdeck && cargo bundle`
+# — otherwise the icon, menu-bar template, and LSUIElement / TCC
+# usage-description plist are silently dropped from the .app.
+#
+# The `resources` glob's `..` segments are then rewritten to `_up_` by
+# cargo-bundle's resource_relpath, so `menubar-template.png` lands at
+# `Resources/_up_/target/...`. `scripts/copy-macos-dylib.sh` flattens
+# it back to the Resources root so NSBundle pathForResource: finds it.
+icon = ["../../target/icon.icns"]
+identifier = "com.hopdeck.HopDeck"
+osx_info_plist_exts = ["../../build-aux/macos-lsui-element.plist"]
+resources = ["../../target/menubar-template.png"]

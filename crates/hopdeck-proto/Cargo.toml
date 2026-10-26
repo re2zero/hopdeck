@@ -1,0 +1,13 @@
+[package]
+name = "hopdeck-proto"
+description = "network protocol for hopdeck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+num_enum = "0.7.2"
+thiserror = "2.0.0"
+input-event = { workspace = true }
+paste = "1.0"

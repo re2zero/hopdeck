@@ -1,5 +1,5 @@
 {
-  description = "Nix Flake for mousehop";
+  description = "Nix Flake for hopdeck";
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     rust-overlay = {
@@ -83,11 +83,11 @@
                   };
                 }
               );
-          mousehop = pkgs.callPackage ./nix { rustPlatform = customRustPlatform; };
+          hopdeck = pkgs.callPackage ./nix { rustPlatform = customRustPlatform; };
         in
         {
-          default = mousehop;
-          inherit mousehop;
+          default = hopdeck;
+          inherit hopdeck;
         }
       );
       devShells = forEachPkgs (

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the project from Mousehop to HopDeck（桌联）. Crate names, the
+  binary, app id (`com.hopdeck.HopDeck`), desktop/icon/service names,
+  config and state paths, IPC/video socket names, environment variables
+  (`HOPDECK_*`), and the mDNS service type (`_hopdeck._udp.local.`) all
+  moved. Ports and event serialization are unchanged, but the `Hello`
+  protocol magic is now `HOPDECK\0`, so Mousehop peers are rejected
+  (deliberate hard break).
+- Restructured the workspace: libraries live under `crates/`, shipped
+  executables under `apps/`. Application identity types moved to
+  `hopdeck-input-event`, removing the capture layer's dependency on the
+  frontend IPC crate.
+
 ## [0.11.3](https://github.com/jondkinney/mousehop/compare/v0.11.2...v0.11.3) - 2026-05-20
 
 ### Added

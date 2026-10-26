@@ -3,7 +3,7 @@ set -e
 
 usage() {
     cat <<EOF
-$0: Build the macOS icns file and menu-bar template from the mousehop SVGs.
+$0: Build the macOS icns file and menu-bar template from the hopdeck SVGs.
 
 The app icon SVG is a self-contained rounded tile (its own background and
 rounded corners), so it is rendered straight into the Big Sur+ 824px squircle
@@ -15,9 +15,9 @@ usage: $0 [APP_SVG [TRAY_SVG [ICNS [ICONSET]]]]
 
 ARGUMENTS
     APP_SVG  The app icon SVG (a self-contained rounded tile)
-             Defaults to ./mousehop-gtk/resources/com.mousehop.Mousehop.svg
+             Defaults to ./crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg
     TRAY_SVG The tray / menu-bar glyph SVG
-             Defaults to ./mousehop-gtk/resources/icons/mousehop-tray.svg
+             Defaults to ./crates/hopdeck-gtk/resources/icons/hopdeck-tray.svg
     ICNS     The icns file to create
              Defaults to ./target/icon.icns
     ICONSET  The iconset directory to create
@@ -31,8 +31,8 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     exit 0
 fi
 
-app_svg="${1:-./mousehop-gtk/resources/com.mousehop.Mousehop.svg}"
-tray_svg="${2:-./mousehop-gtk/resources/icons/mousehop-tray.svg}"
+app_svg="${1:-./crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg}"
+tray_svg="${2:-./crates/hopdeck-gtk/resources/icons/hopdeck-tray.svg}"
 icns="${3:-./target/icon.icns}"
 iconset="${4:-./target/icon.iconset}"
 

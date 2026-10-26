@@ -1,0 +1,540 @@
+use async_trait::async_trait;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Display,
+};
+
+use input_event::{
+    ClipboardEvent, Event, KeyboardEvent, PointerEvent,
+    display::{DisplayEdge, DisplayLayout},
+};
+
+use crate::clipboard::ClipboardEmulation;
+
+pub use self::error::{EmulationCreationError, EmulationError, InputEmulationError};
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
+mod x11;
+
+#[cfg(all(unix, feature = "wlroots", not(target_os = "macos")))]
+mod wlroots;
+
+#[cfg(all(unix, feature = "remote_desktop_portal", not(target_os = "macos")))]
+mod xdg_desktop_portal;
+
+#[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
+mod libei;
+
+#[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+mod usbip;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+pub mod clipboard;
+/// fallback input emulation (logs events)
+mod dummy;
+mod error;
+
+pub type EmulationHandle = u64;
+
+/// Result of an entry-edge cursor warp.
+///
+/// `Applied` carries the exact display snapshot used to project the target so
+/// the caller can publish matching topology metadata in the same handover
+/// transaction. `Unsupported` means this backend cannot report/project an
+/// absolute cursor position; ownership transfer may still proceed without a
+/// landing warp.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EdgeWarpOutcome {
+    Applied(DisplayLayout),
+    Unsupported,
+}
+
+fn edge_warp_projection(
+    layout: &DisplayLayout,
+    edge: DisplayEdge,
+    cross_fraction: f64,
+) -> Option<((i32, i32), (i32, i32))> {
+    let bounds = layout.bounds()?;
+    let global = layout.project_fraction(edge, cross_fraction)?;
+    let origin = bounds.origin();
+    let relative = (
+        i32::try_from(i64::from(global.0) - i64::from(origin.0)).ok()?,
+        i32::try_from(i64::from(global.1) - i64::from(origin.1)).ok()?,
+    );
+    Some((global, relative))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Backend {
+    #[cfg(all(unix, feature = "wlroots", not(target_os = "macos")))]
+    Wlroots,
+    #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
+    Libei,
+    #[cfg(all(unix, feature = "remote_desktop_portal", not(target_os = "macos")))]
+    Xdp,
+    #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
+    X11,
+    /// Kernel-level injection via a loopback USB/IP virtual HID device.
+    /// Never probed automatically: it needs the receiver-side `vhci_hcd`
+    /// module plus a one-time `usbip attach`, so it only activates when
+    /// explicitly selected through config or CLI.
+    #[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+    Usbip,
+    #[cfg(windows)]
+    Windows,
+    #[cfg(target_os = "macos")]
+    MacOs,
+    Dummy,
+}
+
+impl Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            #[cfg(all(unix, feature = "wlroots", not(target_os = "macos")))]
+            Backend::Wlroots => write!(f, "wlroots"),
+            #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
+            Backend::Libei => write!(f, "libei"),
+            #[cfg(all(unix, feature = "remote_desktop_portal", not(target_os = "macos")))]
+            Backend::Xdp => write!(f, "xdg-desktop-portal"),
+            #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
+            Backend::X11 => write!(f, "X11"),
+            #[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+            Backend::Usbip => write!(f, "usbip"),
+            #[cfg(windows)]
+            Backend::Windows => write!(f, "windows"),
+            #[cfg(target_os = "macos")]
+            Backend::MacOs => write!(f, "macos"),
+            Backend::Dummy => write!(f, "dummy"),
+        }
+    }
+}
+
+/// Per-handle receive-side post-processing applied to forwarded
+/// events before they reach the platform emulation backend.
+///
+/// `hopdeck-ipc::IncomingPeerConfig` is the persistent form of
+/// these preferences (keyed by TLS fingerprint). The conversion
+/// happens in `src/emulation.rs`, so this crate stays decoupled
+/// from the IPC layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReceivePostProcessing {
+    /// Sign-flip scroll deltas before injection.
+    pub natural_scroll: bool,
+    /// Linear multiplier on motion deltas. 1.0 = passthrough.
+    pub mouse_sensitivity: f64,
+}
+
+impl Default for ReceivePostProcessing {
+    fn default() -> Self {
+        Self {
+            natural_scroll: false,
+            mouse_sensitivity: 1.0,
+        }
+    }
+}
+
+pub struct InputEmulation {
+    emulation: Box<dyn Emulation>,
+    handles: HashSet<EmulationHandle>,
+    pressed_keys: HashMap<EmulationHandle, HashSet<u32>>,
+    /// Per-handle receive-side post-processing. Populated by the
+    /// upper layer before each event is consumed; missing entries
+    /// resolve to `ReceivePostProcessing::default()` (passthrough).
+    post_processing: HashMap<EmulationHandle, ReceivePostProcessing>,
+    /// Cross-platform clipboard sink. Populated lazily on first
+    /// access; backends don't need to know clipboards exist.
+    /// `None` when the platform clipboard couldn't be opened (e.g.
+    /// headless CI, Wayland session without compositor support).
+    clipboard: Option<ClipboardEmulation>,
+}
+
+impl InputEmulation {
+    async fn with_backend(backend: Backend) -> Result<InputEmulation, EmulationCreationError> {
+        let emulation: Box<dyn Emulation> = match backend {
+            #[cfg(all(unix, feature = "wlroots", not(target_os = "macos")))]
+            Backend::Wlroots => Box::new(wlroots::WlrootsEmulation::new()?),
+            #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
+            Backend::Libei => Box::new(libei::LibeiEmulation::new().await?),
+            #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
+            Backend::X11 => Box::new(x11::X11Emulation::new()?),
+            #[cfg(all(unix, feature = "usbip", not(target_os = "macos")))]
+            Backend::Usbip => Box::new(usbip::UsbipEmulation::new()?),
+            #[cfg(all(unix, feature = "remote_desktop_portal", not(target_os = "macos")))]
+            Backend::Xdp => Box::new(xdg_desktop_portal::DesktopPortalEmulation::new().await?),
+            #[cfg(windows)]
+            Backend::Windows => Box::new(windows::WindowsEmulation::new()?),
+            #[cfg(target_os = "macos")]
+            Backend::MacOs => Box::new(macos::MacOSEmulation::new()?),
+            Backend::Dummy => Box::new(dummy::DummyEmulation::new()),
+        };
+        let clipboard = match ClipboardEmulation::new() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                log::warn!("clipboard emulation unavailable: {e}");
+                None
+            }
+        };
+        Ok(Self {
+            emulation,
+            handles: HashSet::new(),
+            pressed_keys: HashMap::new(),
+            post_processing: HashMap::new(),
+            clipboard,
+        })
+    }
+
+    pub async fn new(backend: Option<Backend>) -> Result<InputEmulation, EmulationCreationError> {
+        if let Some(backend) = backend {
+            let b = Self::with_backend(backend).await;
+            if b.is_ok() {
+                log::info!("using emulation backend: {backend}");
+            }
+            return b;
+        }
+
+        for backend in [
+            #[cfg(all(unix, feature = "wlroots", not(target_os = "macos")))]
+            Backend::Wlroots,
+            #[cfg(all(unix, feature = "libei", not(target_os = "macos")))]
+            Backend::Libei,
+            #[cfg(all(unix, feature = "remote_desktop_portal", not(target_os = "macos")))]
+            Backend::Xdp,
+            #[cfg(all(unix, feature = "x11", not(target_os = "macos")))]
+            Backend::X11,
+            #[cfg(windows)]
+            Backend::Windows,
+            #[cfg(target_os = "macos")]
+            Backend::MacOs,
+            Backend::Dummy,
+        ] {
+            match Self::with_backend(backend).await {
+                Ok(b) => {
+                    log::info!("using emulation backend: {backend}");
+                    return Ok(b);
+                }
+                Err(e) if e.cancelled_by_user() => return Err(e),
+                Err(e) => log::warn!("{e}"),
+            }
+        }
+
+        Err(EmulationCreationError::NoAvailableBackend)
+    }
+
+    pub async fn consume(
+        &mut self,
+        event: Event,
+        handle: EmulationHandle,
+    ) -> Result<(), EmulationError> {
+        // Clipboard events route through the cross-platform
+        // `ClipboardEmulation` sink, not the per-backend pointer /
+        // keyboard pipeline. Per-backend `consume` impls treat
+        // `Event::Clipboard` as a no-op, so handling it here keeps
+        // the dispatch in one place.
+        if let Event::Clipboard(ClipboardEvent::Text(text)) = &event {
+            if let Some(clipboard) = self.clipboard.as_ref() {
+                if let Err(e) = clipboard.set(ClipboardEvent::Text(text.clone())).await {
+                    log::warn!("failed to set clipboard: {e}");
+                }
+            }
+            return Ok(());
+        }
+        // Apply per-handle receive-side post-processing in a single
+        // place rather than per-backend. Backends stay
+        // platform-mechanics-only and are spared duplicate sign-flip
+        // / multiplier code. Algorithm pattern (mutate-event-and-
+        // forward) borrowed from #347.
+        let pp = self
+            .post_processing
+            .get(&handle)
+            .copied()
+            .unwrap_or_default();
+        // Drop the source OS's momentum-coast scroll on a non-macOS sink. This
+        // machine doesn't replay OS momentum for injected scroll, and a cohort
+        // app synthesises its own fling from the gesture — so replaying a
+        // forwarded macOS coast just feeds its gap-inference a gapless stream
+        // and pins it at the edges. A macOS sink keeps these (it replays the
+        // coast, so a Mac->Mac session still glides). See input_event docs.
+        #[cfg(not(target_os = "macos"))]
+        if matches!(
+            event,
+            Event::Pointer(PointerEvent::Axis { momentum: true, .. })
+        ) {
+            return Ok(());
+        }
+        let event = match event {
+            Event::Pointer(PointerEvent::Motion { time, dx, dy })
+                if pp.mouse_sensitivity != 1.0 =>
+            {
+                Event::Pointer(PointerEvent::Motion {
+                    time,
+                    dx: dx * pp.mouse_sensitivity,
+                    dy: dy * pp.mouse_sensitivity,
+                })
+            }
+            Event::Pointer(PointerEvent::Axis {
+                time,
+                axis,
+                value,
+                momentum,
+            }) if pp.natural_scroll => Event::Pointer(PointerEvent::Axis {
+                time,
+                axis,
+                value: -value,
+                momentum,
+            }),
+            Event::Pointer(PointerEvent::AxisDiscrete120 { axis, value }) if pp.natural_scroll => {
+                Event::Pointer(PointerEvent::AxisDiscrete120 {
+                    axis,
+                    value: -value,
+                })
+            }
+            other => other,
+        };
+        match event {
+            Event::Keyboard(KeyboardEvent::Key { key, state, .. }) => {
+                // prevent double pressed / released keys
+                if self.update_pressed_keys(handle, key, state) {
+                    self.emulation.consume(event, handle).await?;
+                }
+                Ok(())
+            }
+            _ => self.emulation.consume(event, handle).await,
+        }
+    }
+
+    /// Set the receive-side post-processing for a specific handle.
+    /// Subsequent `consume()` calls for this handle apply the
+    /// `natural_scroll` and `mouse_sensitivity` transforms.
+    pub fn set_post_processing(
+        &mut self,
+        handle: EmulationHandle,
+        post_processing: ReceivePostProcessing,
+    ) {
+        self.post_processing.insert(handle, post_processing);
+    }
+
+    pub async fn create(&mut self, handle: EmulationHandle) -> bool {
+        if self.handles.insert(handle) {
+            self.pressed_keys.insert(handle, HashSet::new());
+            self.emulation.create(handle).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn destroy(&mut self, handle: EmulationHandle) {
+        let _ = self.release_keys(handle).await;
+        if self.handles.remove(&handle) {
+            self.pressed_keys.remove(&handle);
+            self.post_processing.remove(&handle);
+            self.emulation.destroy(handle).await
+        }
+    }
+
+    pub async fn terminate(&mut self) {
+        for handle in self.handles.iter().cloned().collect::<Vec<_>>() {
+            self.destroy(handle).await
+        }
+        self.emulation.terminate().await
+    }
+
+    /// Display geometry of this device (union of all active
+    /// displays), if the backend can report it. See
+    /// `Emulation::display_bounds`.
+    pub fn display_bounds(&mut self) -> Option<(u32, u32)> {
+        self.emulation.display_bounds()
+    }
+
+    /// Full logical topology of this device's active displays. Backends that
+    /// only report a bounding size inherit a single-rectangle layout from the
+    /// trait default.
+    pub fn display_layout(&mut self) -> Option<DisplayLayout> {
+        self.emulation.display_layout()
+    }
+
+    /// Warp the local cursor to the given absolute position. See
+    /// `Emulation::warp_cursor`.
+    pub async fn warp_cursor(&mut self, x: i32, y: i32) -> Result<(), EmulationError> {
+        self.emulation.warp_cursor(x, y).await
+    }
+
+    /// Warp to the actual exposed contour on `edge`, preserving the
+    /// normalized position along its cross axis. Unlike a rectangular
+    /// bounding-box warp, this cannot land in the empty corner of a stepped
+    /// multi-monitor layout.
+    pub async fn warp_cursor_to_edge(
+        &mut self,
+        edge: DisplayEdge,
+        cross_fraction: f64,
+    ) -> Result<EdgeWarpOutcome, EmulationError> {
+        if !self.emulation.supports_edge_warp() {
+            return Ok(EdgeWarpOutcome::Unsupported);
+        }
+        let layout = self
+            .emulation
+            .display_layout()
+            .ok_or(EmulationError::DisplayTopologyUnavailable)?;
+        let Some(((global_x, global_y), (x, y))) =
+            edge_warp_projection(&layout, edge, cross_fraction)
+        else {
+            return Err(EmulationError::DisplayTopologyUnavailable);
+        };
+        log::info!(
+            "[cursor-pos] projected {edge:?} fraction={cross_fraction:.4} onto global=({global_x},{global_y}), union-relative=({x},{y})"
+        );
+        self.emulation.warp_cursor_in_layout(x, y, &layout).await?;
+        Ok(EdgeWarpOutcome::Applied(layout))
+    }
+
+    pub async fn release_keys(&mut self, handle: EmulationHandle) -> Result<(), EmulationError> {
+        if let Some(keys) = self.pressed_keys.get_mut(&handle) {
+            let keys = keys.drain().collect::<Vec<_>>();
+            for key in keys {
+                let event = Event::Keyboard(KeyboardEvent::Key {
+                    time: 0,
+                    key,
+                    state: 0,
+                });
+                self.emulation.consume(event, handle).await?;
+                if let Ok(key) = input_event::scancode::Linux::try_from(key) {
+                    log::warn!("releasing stuck key: {key:?}");
+                }
+            }
+        }
+
+        let event = Event::Keyboard(KeyboardEvent::Modifiers {
+            depressed: 0,
+            latched: 0,
+            locked: 0,
+            group: 0,
+        });
+        self.emulation.consume(event, handle).await?;
+        Ok(())
+    }
+
+    pub fn has_pressed_keys(&self, handle: EmulationHandle) -> bool {
+        self.pressed_keys
+            .get(&handle)
+            .is_some_and(|p| !p.is_empty())
+    }
+
+    /// update the pressed_keys for the given handle
+    /// returns whether the event should be processed
+    fn update_pressed_keys(&mut self, handle: EmulationHandle, key: u32, state: u8) -> bool {
+        let Some(pressed_keys) = self.pressed_keys.get_mut(&handle) else {
+            return false;
+        };
+
+        if state == 0 {
+            // currently pressed => can release
+            pressed_keys.remove(&key)
+        } else {
+            // currently not pressed => can press
+            pressed_keys.insert(key)
+        }
+    }
+}
+
+#[async_trait]
+trait Emulation: Send {
+    async fn consume(
+        &mut self,
+        event: Event,
+        handle: EmulationHandle,
+    ) -> Result<(), EmulationError>;
+    async fn create(&mut self, handle: EmulationHandle);
+    async fn destroy(&mut self, handle: EmulationHandle);
+    async fn terminate(&mut self);
+
+    /// Geometry (width, height) of the union of this device's
+    /// active displays in pixels. Used by the protocol-level
+    /// `Bounds` event so a capturing peer can model the guest
+    /// cursor's position. Backends that can't report geometry
+    /// should leave the default `None` and the wall-press
+    /// auto-release fallback will degrade to "no upper clamp"
+    /// behavior on the host.
+    fn display_bounds(&mut self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// Full logical display topology used to project edge warps onto the
+    /// actual monitor contour. Backends that only expose a bounding size get
+    /// rectangular behavior from this default; topology-aware backends should
+    /// override it with every active display rectangle.
+    fn display_layout(&mut self) -> Option<DisplayLayout> {
+        let (width, height) = self.display_bounds()?;
+        let layout = DisplayLayout::new([(0, 0, width, height)]);
+        (!layout.is_empty()).then_some(layout)
+    }
+
+    /// Whether this backend can project and apply an absolute entry-edge
+    /// cursor warp. Backends that only support relative emulation retain the
+    /// default and complete handover with an `Unsupported` outcome.
+    fn supports_edge_warp(&self) -> bool {
+        false
+    }
+
+    /// Apply a union-relative target using the exact layout snapshot that was
+    /// used to project it. Geometry-aware backends override this to avoid
+    /// mixing the target from one hotplug generation with the extent/origin
+    /// from another; the default preserves existing backends whose
+    /// `warp_cursor` query is already self-contained.
+    async fn warp_cursor_in_layout(
+        &mut self,
+        x: i32,
+        y: i32,
+        _layout: &DisplayLayout,
+    ) -> Result<(), EmulationError> {
+        self.warp_cursor(x, y).await
+    }
+
+    /// Warp the cursor to an absolute position on the receiving
+    /// device's primary display, if the backend supports absolute
+    /// positioning. Called when an `Enter` event arrives so the
+    /// guest cursor lands at the entry edge instead of staying
+    /// wherever the previous capture session left it. Backends
+    /// without absolute positioning can leave the default no-op
+    /// — the wall-press auto-release will be inaccurate but the
+    /// connection still works.
+    async fn warp_cursor(&mut self, _x: i32, _y: i32) -> Result<(), EmulationError> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::{DisplayEdge, DisplayLayout, edge_warp_projection};
+
+    #[test]
+    fn edge_warps_are_union_relative_but_follow_the_real_contour() {
+        let linux = DisplayLayout::new([
+            (-1024, 0, 1024, 600),
+            (0, 0, 3072, 1728),
+            (836, 1728, 1280, 360),
+        ]);
+        assert_eq!(
+            edge_warp_projection(&linux, DisplayEdge::Right, 500.5 / 2088.0),
+            Some(((3071, 500), (4095, 500))),
+        );
+        assert_eq!(
+            edge_warp_projection(&linux, DisplayEdge::Right, 1800.5 / 2088.0),
+            Some(((2115, 1800), (3139, 1800))),
+        );
+
+        let mac = DisplayLayout::new([(0, 0, 3072, 1728), (-1728, 0, 1728, 1117)]);
+        assert_eq!(
+            edge_warp_projection(&mac, DisplayEdge::Left, 500.5 / 1728.0),
+            Some(((-1728, 500), (0, 500))),
+        );
+        assert_eq!(
+            edge_warp_projection(&mac, DisplayEdge::Left, 1500.5 / 1728.0),
+            Some(((0, 1500), (1728, 1500))),
+        );
+    }
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-time receiver-side setup for Mousehop's USB/IP injection backend.
+# One-time receiver-side setup for HopDeck's USB/IP injection backend.
 #
-# The mousehop daemon exports a composite virtual HID device (keyboard +
+# The hopdeck daemon exports a composite virtual HID device (keyboard +
 # mouse) on 127.0.0.1:3240. This script loads the kernel's virtual host
 # controller and attaches that device, so the OS sees a regular USB
 # keyboard/mouse — no compositor cooperation (libei portal etc.) needed.
@@ -50,12 +50,12 @@ cmd_attach() {
         return
     fi
     info "attaching ${BUS_ID} from ${HOST}:${PORT}"
-    # The mousehop daemon must be running on this machine with
+    # The hopdeck daemon must be running on this machine with
     # emulation_backend = "usbip" (or --emulation-backend usbip),
     # otherwise the import is refused.
-    usbip attach -r "${HOST}" -b "${BUS_ID}" || die "attach failed. Is mousehop running
+    usbip attach -r "${HOST}" -b "${BUS_ID}" || die "attach failed. Is hopdeck running
   with the usbip emulation backend enabled on this machine?
-  Check: RUST_LOG=info mousehop --emulation-backend usbip test-emulation"
+  Check: RUST_LOG=info hopdeck --emulation-backend usbip test-emulation"
     info "attached. The virtual keyboard/mouse should appear in this session now:"
     usbip port
 }

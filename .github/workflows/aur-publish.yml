@@ -9,10 +9,9 @@ name: AUR publish
 # This workflow pins per-release fields (pkgver, pkgrel, sha256sums),
 # regenerates .SRCINFO, and pushes to the matching AUR repo.
 #
-# SHARED WORKFLOW — this file is byte-identical across
-# jondkinney/{hyprcorrect,mousehop,tensaku,vernier}. Every per-repo value is
-# derived from the github context at runtime; do not hardcode anything
-# repo-specific. A drift-check guards the three copies.
+# Vendored from the upstream release-pipeline cohort. Every per-repo
+# value is derived from the GitHub context at runtime; do not hardcode
+# anything repo-specific.
 
 on:
   release:

@@ -9,11 +9,9 @@ name: release-flatpak
 # the manifest's declared runtime, so it comes from the per-repo
 # FLATPAK_CI_IMAGE repository variable. Everything else is derived.
 #
-# SHARED WORKFLOW — this file is byte-identical across
-# jondkinney/{hyprcorrect,mousehop,tensaku,vernier}. Every per-repo value is
-# derived from the github context or the FLATPAK_CI_IMAGE variable; do
-# not hardcode anything repo-specific. A drift-check guards the three
-# copies.
+# Vendored from the upstream release-pipeline cohort. Every per-repo
+# value is derived from the GitHub context or the FLATPAK_CI_IMAGE
+# variable; do not hardcode anything repo-specific.
 
 on:
   release:

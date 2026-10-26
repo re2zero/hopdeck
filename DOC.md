@@ -1,8 +1,55 @@
 # General Software Architecture
 
+## Workspace layout
+
+The workspace splits reusable libraries from shipped executables:
+
+| Path | Package | Role |
+|------|---------|------|
+| `apps/hopdeck` | `hopdeck` | daemon binary + GTK settings app |
+| `apps/hopdeck-console` | `hopdeck-console` | GPUI control console |
+| `crates/hopdeck-input-event` | `hopdeck-input-event` | shared input + app-identity types |
+| `crates/hopdeck-input-capture` | `hopdeck-input-capture` | OS capture backends |
+| `crates/hopdeck-input-emulation` | `hopdeck-input-emulation` | OS emulation backends |
+| `crates/hopdeck-proto` | `hopdeck-proto` | UDP wire protocol |
+| `crates/hopdeck-ipc` | `hopdeck-ipc` | daemon ↔ frontend IPC |
+| `crates/hopdeck-video` | `hopdeck-video` | screen capture, codec, transport |
+| `crates/hopdeck-cli` | `hopdeck-cli` | CLI frontend library |
+| `crates/hopdeck-gtk` | `hopdeck-gtk` | GTK4 / Libadwaita frontend library |
+
+The data path is `hopdeck-input-capture` → daemon → `hopdeck-proto` over
+UDP+DTLS → daemon → `hopdeck-input-emulation`. The control path is
+frontends ↔ `hopdeck-ipc` ↔ daemon. `hopdeck-input-capture` depends only on
+`hopdeck-input-event`; application identity types (`AppIdent`, `HostKind`,
+`RunningApp`) live there so the capture layer never depends on the frontend
+protocol.
+
+## Rename compatibility (Mousehop → HopDeck, 2026-10)
+
+The product was renamed from Mousehop to HopDeck（桌联）in October 2026. Ports
+and event serialization are unchanged, but the 8-byte `Hello` protocol magic
+is now `HOPDECK\0` — a deliberate hard break, so HopDeck and Mousehop peers
+reject each other. Every user-visible namespace moved:
+
+| Surface | Old | New |
+|---------|-----|-----|
+| binary | `mousehop` | `hopdeck` |
+| console binary | — | `hopdeck-console` |
+| app id / desktop / icon | `com.mousehop.Mousehop` | `com.hopdeck.HopDeck` |
+| config dir | `$XDG_CONFIG_HOME/mousehop/` | `$XDG_CONFIG_HOME/hopdeck/` |
+| certificate file | `mousehop.pem` | `hopdeck.pem` |
+| IPC / video sockets | `mousehop-*.sock` | `hopdeck-*.sock` |
+| systemd unit | `mousehop.service` | `hopdeck.service` |
+| mDNS service type | `_mousehop._udp.local.` | `_hopdeck._udp.local.` |
+| environment variables | `MOUSEHOP_*` | `HOPDECK_*` |
+| crates | `mousehop-*` | `hopdeck-*` |
+
+Because mDNS and the app id changed, a HopDeck build does not auto-discover
+or pair with a Mousehop build; both sides should run the same release.
+
 ## Events
 
-Each instance of mousehop can emit and receive events, where
+Each instance of `hopdeck` can emit and receive events, where
 an event is either a mouse or keyboard event for now.
 
 The general Architecture is shown in the following flow chart:
@@ -72,7 +119,7 @@ Either events are sent or received.
 
 This ensures that
 - a) Events can never result in a feedback loop.
-- b) As soon as a virtual input enters another client, mousehop will stop receiving events,
+- b) As soon as a virtual input enters another client, hopdeck will stop receiving events,
 which ensures clients can only be controlled directly and not indirectly through other clients.
 
 ## Access Password (Session Admission)
@@ -128,5 +175,5 @@ certificate fingerprint is in `authorized_fingerprints` **and** that peer
 holds a live input session from the same source IP — the tunnel rides the
 session's trust and dies with it. The exit dials only targets matching its
 `[tunnel].allow` rules (default deny); domain targets are resolved by the
-exit, which is what makes split-horizon names work. mousehop-proto is
+exit, which is what makes split-horizon names work. hopdeck-proto is
 untouched: the tunnel is an application-layer protocol on its own channel.

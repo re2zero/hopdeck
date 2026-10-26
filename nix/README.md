@@ -3,10 +3,10 @@
 ## Run
 
 ```bash
-nix run github:jondkinney/mousehop
+nix run github:re2zero/hopdeck
 
 # With params
-nix run github:jondkinney/mousehop -- --help
+nix run github:re2zero/hopdeck -- --help
 
 ```
 
@@ -16,26 +16,26 @@ Add input:
 
 ```nix
 inputs = {
-    mousehop.url = "github:jondkinney/mousehop";
+    hopdeck.url = "github:re2zero/hopdeck";
 }
 ```
 
-Optional: once a [cachix cache](https://app.cachix.org/cache/mousehop) is set up
+Optional: once a [cachix cache](https://app.cachix.org/cache/hopdeck) is set up
 for this fork, add it as a binary cache for faster package installs.
 
 ```nix
 nixConfig = {
     extra-substituters = [
-        "https://mousehop.cachix.org/"
+        "https://hopdeck.cachix.org/"
     ];
     extra-trusted-public-keys = [
-        # TODO: add the public key for the `mousehop` cachix cache once it
-        # exists, e.g. "mousehop.cachix.org-1:<public-key>"
+        # TODO: add the public key for the `hopdeck` cachix cache once it
+        # exists, e.g. "hopdeck.cachix.org-1:<public-key>"
     ];
 };
 ```
 
-Enable mousehop:
+Enable HopDeck:
 
 ``` nix
 {
@@ -43,12 +43,12 @@ Enable mousehop:
   ...
 }: {
   # Add the Home Manager module
-  imports = [inputs.mousehop.homeManagerModules.default];
+  imports = [inputs.hopdeck.homeManagerModules.default];
 
-  programs.mousehop = {
+  programs.hopdeck = {
     enable = true;
     # systemd = false;
-    # package = inputs.mousehop.packages.${pkgs.stdenv.hostPlatform.system}.default
+    # package = inputs.hopdeck.packages.${pkgs.stdenv.hostPlatform.system}.default
     # Optional configuration in nix syntax, see config.toml for available options
     # settings = { };
     };

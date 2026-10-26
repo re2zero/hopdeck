@@ -1,0 +1,41 @@
+[package]
+name = "hopdeck-console"
+description = "GPUI control console frontend for hopdeck"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futures = "0.3.28"
+gpui = { version = "=0.3.9", package = "gpui-pre" }
+gpui-base = "0.8.0"
+gpui-component = "0.8.0"
+gpui-kit = "0.8.0"
+hostname = "0.4.0"
+# Decoded-frame → `RenderImage` handoff; version-unified with gpui-pre's
+# `image` (the lockfile already carries it).
+image = "0.25"
+log = "0.4.20"
+hopdeck-ipc = { workspace = true }
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+# Motif decoration strip on X11 WMs without _GTK_FRAME_EXTENTS
+# (`window_deco.rs`); version-unified with gpui's own x11rb leaf.
+x11rb = "0.13"
+
+[features]
+# UI integration tests (src/console/ui_tests.rs), run with:
+#   cargo test -p hopdeck-console --features ui-test-support
+#
+# gpui-kit's own `test-support` is deliberately NOT used: dev-depending
+# on gpui-kit (or enabling that feature, which joins lockfile
+# resolution even while off) drags gpui-kit's dev-deps (gpui-fast) into
+# resolution, and their exact-version pins conflict with the locked
+# graph. gpui + gpui-base + gpui-component test-support keep the same
+# headless window/observation capabilities with conflict-free new
+# leaves (component's is needed for its `Observed` trait impls).
+ui-test-support = [
+    "gpui/test-support",
+    "gpui-base/test-support",
+    "gpui-component/test-support",
+]

@@ -3,6 +3,6 @@
   <key>NSAppSleepDisabled</key>
   <true/>
   <key>NSInputMonitoringUsageDescription</key>
-  <string>Mousehop needs Input Monitoring access to capture keyboard and mouse input and forward it to remote machines on your network.</string>
+  <string>HopDeck needs Input Monitoring access to capture keyboard and mouse input and forward it to remote machines on your network.</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Mousehop uses Apple Events to deliver synthesized keyboard and mouse events to the system.</string>
+  <string>HopDeck uses Apple Events to deliver synthesized keyboard and mouse events to the system.</string>

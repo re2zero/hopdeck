@@ -1,20 +1,22 @@
 <h1>
-  <img src="assets/icons/png/mousehop-512.png" alt="Mousehop icon" width="72" height="72" align="middle">
-  &nbsp;Mousehop
+  <img src="assets/icons/png/hopdeck-512.png" alt="桌联 HopDeck icon" width="72" height="72" align="middle">
+  &nbsp;桌联 HopDeck
 </h1>
 
-[![CI](https://github.com/jondkinney/mousehop/actions/workflows/rust.yml/badge.svg)](https://github.com/jondkinney/mousehop/actions/workflows/rust.yml) [![Cachix](https://github.com/jondkinney/mousehop/actions/workflows/cachix.yml/badge.svg)](https://github.com/jondkinney/mousehop/actions/workflows/cachix.yml) [![Release](https://github.com/jondkinney/mousehop/actions/workflows/release.yml/badge.svg)](https://github.com/jondkinney/mousehop/actions/workflows/release.yml)
+[![CI](https://github.com/re2zero/hopdeck/actions/workflows/ci.yml/badge.svg)](https://github.com/re2zero/hopdeck/actions/workflows/ci.yml) [![Cachix](https://github.com/re2zero/hopdeck/actions/workflows/cachix.yml/badge.svg)](https://github.com/re2zero/hopdeck/actions/workflows/cachix.yml) [![Release](https://github.com/re2zero/hopdeck/actions/workflows/release.yml/badge.svg)](https://github.com/re2zero/hopdeck/actions/workflows/release.yml)
 
 [![license: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](./LICENSE)
 
-> Mousehop is a fork of [lan-mouse](https://github.com/feschber/lan-mouse) by
+> **HopDeck（中文名「桌联」）** is a fork of [Mousehop](https://github.com/jondkinney/mousehop),
+> which is a fork of [lan-mouse](https://github.com/feschber/lan-mouse) by
 > Ferdinand Schober ([feschber](https://github.com/feschber)) and its
-> contributors. Forked in April 2026 and rebranded as Mousehop in May 2026,
-> it is a modified version distributed under the same GNU GPL-3.0-or-later
-> license. Huge thanks to the original author and contributors — see
+> contributors. The lan-mouse fork began in April 2026, was distributed as
+> Mousehop from May 2026, and was renamed to HopDeck in October 2026. It is a
+> modified version distributed under the same GNU GPL-3.0-or-later license.
+> Huge thanks to the original authors and contributors — see
 > [`NOTICE`](./NOTICE) for attribution details.
 
-Mousehop is a *cross-platform* mouse and keyboard sharing software similar to universal-control on Apple devices.
+HopDeck is a *cross-platform* mouse and keyboard sharing software similar to universal-control on Apple devices.
 It allows for using multiple PCs via a single set of mouse and keyboard.
 This is also known as a Software KVM switch.
 
@@ -25,18 +27,18 @@ Focus lies on performance, ease of use and a maintainable implementation that ca
 
 ***blazingly fast™*** because it's written in rust.
 
-- _Now with a gtk frontend_
+- Two frontends: a GTK4 / Libadwaita settings app (bundled into `hopdeck`) and a GPUI control console (`hopdeck-console`).
 
 <p align="center">
-    <img alt="The Mousehop main window: General settings, Outgoing Auto-Release threshold, paired peers, mDNS discovery, and Clipboard Privacy"
-         src="screenshots/mousehop-prefs.png"
+    <img alt="The HopDeck main window: General settings, Outgoing Auto-Release threshold, paired peers, mDNS discovery, and Clipboard Privacy"
+         src="screenshots/hopdeck-prefs.png"
          width="420">
 </p>
 
 
 ## Encryption
 
-Mousehop encrypts all network traffic using the DTLS implementation provided by [WebRTC.rs](https://github.com/webrtc-rs/webrtc).
+HopDeck encrypts all network traffic using the DTLS implementation provided by [WebRTC.rs](https://github.com/webrtc-rs/webrtc).
 There are currently no mitigations in place for timing side-channel attacks.
 
 ## OS Support
@@ -68,11 +70,11 @@ For more detailed information about os support see [Detailed OS Support](#detail
 ### Android & IOS
 
 A proof of concept for an Android / IOS Application by [rohitsangwan01](https://github.com/rohitsangwan01) can be found [here](https://github.com/rohitsangwan01/lan-mouse-mobile).
-It can be used as a remote control for any device supported by Mousehop.
+It can be used as a remote control for any device supported by HopDeck.
 
 ## Installation
 
-> Mousehop is a young fork and is not yet packaged in distribution
+> HopDeck is a young fork and is not yet packaged in distribution
 > repositories (Arch, Fedora, nixpkgs). Until then, install from a release
 > binary, the Nix flake, or build from source.
 
@@ -86,46 +88,46 @@ It can be used as a remote control for any device supported by Mousehop.
     <summary>MacOS</summary>
 
 - Download the `.dmg` for your Mac (Intel or Apple Silicon) from the releases page
-- Open the `.dmg` and drag `Mousehop.app` into `Applications`
+- Open the `.dmg` and drag `HopDeck.app` into `Applications`
 - Launch the app — release builds are signed with a Developer ID and notarized by Apple, so it opens with no Gatekeeper prompt
-- Use the menu bar item to open the settings window or quit Mousehop. Bundled macOS builds run as a menu bar app and do not keep a Dock icon visible.
+- Use the menu bar item to open the settings window or quit HopDeck. Bundled macOS builds run as a menu bar app and do not keep a Dock icon visible.
 - Grant accessibility permissions in System Settings
-- While this Mac is controlling a peer, Mousehop automatically keeps macOS from starting the idle screen saver or turning off the display. The keep-awake assertion ends as soon as the cursor returns to this Mac.
-- If the Mac nevertheless locks after a controlled peer sleeps or disconnects, Mousehop releases capture and shows confirmed recovery status on that peer. Use the keyboard physically attached to the Mac: Shift is a harmless wake key, then wait for the status; type the Mac password only while the peer still reports **locked**. The dialog has no password field, and Mousehop never reads or transports the password. If status becomes **unavailable**, switch the monitor to the Mac or use Touch ID, Apple Watch, or your hardware input switch instead.
+- While this Mac is controlling a peer, HopDeck automatically keeps macOS from starting the idle screen saver or turning off the display. The keep-awake assertion ends as soon as the cursor returns to this Mac.
+- If the Mac nevertheless locks after a controlled peer sleeps or disconnects, HopDeck releases capture and shows confirmed recovery status on that peer. Use the keyboard physically attached to the Mac: Shift is a harmless wake key, then wait for the status; type the Mac password only while the peer still reports **locked**. The dialog has no password field, and HopDeck never reads or transports the password. If status becomes **unavailable**, switch the monitor to the Mac or use Touch ID, Apple Watch, or your hardware input switch instead.
 
 </details>
 
 <details>
     <summary>Windows</summary>
 
-- Download `mousehop-windows-x86_64.zip` from the releases page and extract it somewhere permanent — the GTK DLLs next to `mousehop.exe` are required, so keep the folder intact
-- Run `mousehop.exe`. No console window appears, and none has to stay open
+- Download `hopdeck-windows-x86_64.zip` from the releases page and extract it somewhere permanent — the GTK DLLs next to `hopdeck.exe` are required, so keep the folder intact
+- Run `hopdeck.exe`. No console window appears, and none has to stay open
 
-**Notification area.** Closing the settings window does not quit Mousehop — it
+**Notification area.** Closing the settings window does not quit HopDeck — it
 hides to the notification area (the "system tray") and keeps sharing input.
 
 - Left-click the tray icon to show or hide the settings window
-- Right-click it for **Open Mousehop** / **Quit Mousehop**
+- Right-click it for **Open HopDeck** / **Quit HopDeck**
 - Quitting from that menu is the only thing that stops input sharing
 
 Windows 11 files new tray icons into the overflow flyout (the `^` chevron) by
-default. Drag the Mousehop icon out of the flyout and onto the taskbar to keep
+default. Drag the HopDeck icon out of the flyout and onto the taskbar to keep
 it visible, or find it under Settings → Personalization → Taskbar → Other system
 tray icons.
 
 **Start with Windows.** Press <kbd>Win</kbd>+<kbd>R</kbd>, run `shell:startup`,
-and drop a shortcut to `mousehop.exe` into the folder that opens.
+and drop a shortcut to `hopdeck.exe` into the folder that opens.
 
-**Command line.** `mousehop.exe` is a GUI application, so it prints to the
-terminal only when you give it something to do — `mousehop.exe cli list`,
-`mousehop.exe --help`, `mousehop.exe daemon`. A plain `mousehop.exe` typed at a
+**Command line.** `hopdeck.exe` is a GUI application, so it prints to the
+terminal only when you give it something to do — `hopdeck.exe cli list`,
+`hopdeck.exe --help`, `hopdeck.exe daemon`. A plain `hopdeck.exe` typed at a
 prompt stays silent and detached, so closing that terminal will not take the app
-with it; set `MOUSEHOP_LOG_LEVEL` (e.g. `debug`) to make a GUI launch log to the
+with it; set `HOPDECK_LOG_LEVEL` (e.g. `debug`) to make a GUI launch log to the
 terminal anyway. As with any Windows GUI program, the prompt returns immediately
 rather than waiting for the command to finish.
 
 Crashes are recorded either way, at
-`%LOCALAPPDATA%\Mousehop\logs\panic.log`.
+`%LOCALAPPDATA%\HopDeck\logs\panic.log`.
 
 </details>
 
@@ -135,53 +137,53 @@ Crashes are recorded either way, at
 
 First make sure to [install the necessary dependencies](#installing-dependencies-for-development--compiling-from-source).
 
-Precompiled release binaries for Windows, MacOS and Linux are available in the [releases section](https://github.com/jondkinney/mousehop/releases).
+Precompiled release binaries for Windows, MacOS and Linux are available in the [releases section](https://github.com/re2zero/hopdeck/releases).
 For Windows, the depenedencies are included in the .zip file, for other operating systems see [Installing Dependencies](#installing-dependencies-for-development--compiling-from-source).
 
-Alternatively, the `mousehop` binary can be compiled from source (see below).
+Alternatively, the `hopdeck` binary can be compiled from source (see below).
 
 ### Installing desktop file, app icon and firewall rules (optional)
 ```sh
-# install mousehop (replace path/to/ with the correct path)
-sudo cp path/to/mousehop /usr/local/bin/
+# install hopdeck (replace path/to/ with the correct path)
+sudo cp path/to/hopdeck /usr/local/bin/
 
 # install app icon
 sudo mkdir -p /usr/local/share/icons/hicolor/scalable/apps
-sudo cp mousehop-gtk/resources/com.mousehop.Mousehop.svg /usr/local/share/icons/hicolor/scalable/apps
+sudo cp crates/hopdeck-gtk/resources/com.hopdeck.HopDeck.svg /usr/local/share/icons/hicolor/scalable/apps
 
 # update icon cache
 gtk-update-icon-cache /usr/local/share/icons/hicolor/
 
 # install desktop entry
 sudo mkdir -p /usr/local/share/applications
-sudo cp com.mousehop.Mousehop.desktop /usr/local/share/applications
+sudo cp apps/hopdeck/com.hopdeck.HopDeck.desktop /usr/local/share/applications
 
 # when using firewalld: install firewall rule
-sudo cp firewall/mousehop.xml /etc/firewalld/services
+sudo cp firewall/hopdeck.xml /etc/firewalld/services
 # -> enable the service in firewalld settings
 ```
 
-Instead of downloading from the releases, the `mousehop` binary
+Instead of downloading from the releases, the `hopdeck` binary
 can be easily compiled via cargo or nix:
 
 ### Compiling and installing manually:
 ```sh
 # compile in release mode
-cargo build --release
+cargo build --release -p hopdeck
 
-# install mousehop
-sudo cp target/release/mousehop /usr/local/bin/
+# install hopdeck
+sudo cp target/release/hopdeck /usr/local/bin/
 ```
 
 ### Compiling and installing via cargo:
 ```sh
 # will end up in ~/.cargo/bin
-cargo install --git https://github.com/jondkinney/mousehop
+cargo install --git https://github.com/re2zero/hopdeck --package hopdeck
 ```
 
 ### Compiling and installing via nix:
 ```sh
-# you can find the executable in result/bin/mousehop
+# you can find the executable in result/bin/hopdeck
 nix-build
 ```
 ### Conditional compilation
@@ -195,7 +197,7 @@ E.g. if only support for sway is needed, the following command produces
 an executable with support for only the `layer-shell` capture backend
 and `wlroots` emulation backend:
 ```sh
-cargo build --no-default-features --features layer_shell_capture,wlroots_emulation
+cargo build -p hopdeck --no-default-features --features layer_shell_capture,wlroots_emulation
 ```
 For a detailed list of available features, checkout the [Cargo.toml](./Cargo.toml)
 </details>
@@ -203,6 +205,30 @@ For a detailed list of available features, checkout the [Cargo.toml](./Cargo.tom
 
 
 ## Development
+
+### Repository layout
+
+The workspace separates reusable libraries (`crates/`) from shipped
+executables (`apps/`):
+
+```
+apps/
+  hopdeck/            # `hopdeck` binary: daemon + GTK settings app
+  hopdeck-console/    # `hopdeck-console` binary: GPUI control console
+crates/
+  hopdeck-input-event/     # shared input + app-identity types
+  hopdeck-input-capture/   # OS capture backends (libei, layer-shell, X11, Windows, macOS)
+  hopdeck-input-emulation/ # OS emulation backends (wlroots, libei, portal, X11, Windows, macOS, USB/IP)
+  hopdeck-proto/           # UDP wire protocol
+  hopdeck-ipc/             # daemon <-> frontend IPC (JSON over a Unix socket)
+  hopdeck-video/           # screen capture + H.264 codec + transport
+  hopdeck-cli/             # CLI frontend library
+  hopdeck-gtk/             # GTK4 / Libadwaita frontend library
+```
+
+`hopdeck-input-capture` depends only on `hopdeck-input-event`, never on
+`hopdeck-ipc`: capture backends produce domain values, the IPC layer
+serializes them.
 
 ### Git pre-commit hook
 
@@ -232,8 +258,8 @@ brew install libadwaita pkg-config imagemagick
 cargo install cargo-bundle
 # Create the macOS icon file
 scripts/makeicns.sh
-# Create the .app bundle
-cargo bundle
+# Create the .app bundle (cargo-bundle resolves resources from CWD)
+(cd apps/hopdeck && cargo bundle)
 # Copy all dynamic libraries into the bundle, and update the bundle to find them there
 scripts/copy-macos-dylib.sh
 ```
@@ -324,7 +350,7 @@ the gtk frontend (see conditional compilation).
 <details>
     <summary>Gtk Frontend</summary>
 
-By default the gtk frontend will open when running `mousehop`.
+By default the gtk frontend will open when running `hopdeck`.
 
 To connect a device you want to control, simply click the `Add` button and enter the hostname
 of the device.
@@ -371,11 +397,11 @@ plain text in the config file, so protect that file.
 The cli interface can be accessed by passing `cli` as a commandline argument.
 Use
 ```sh
-mousehop cli help
+hopdeck cli help
 ```
  to list the available commands and
 ```sh
-mousehop cli <cmd> help
+hopdeck cli <cmd> help
 ```
 for information on how to use a specific command.
 
@@ -384,38 +410,38 @@ for information on how to use a specific command.
 <details>
     <summary>Daemon Mode</summary>
 
-Mousehop can be launched in daemon mode to keep it running in the background (e.g. for use in a systemd-service).
+HopDeck can be launched in daemon mode to keep it running in the background (e.g. for use in a systemd-service).
 
 To do so, use the `daemon` subcommand:
 
 ```sh
-mousehop daemon
+hopdeck daemon
 ```
 </details>
 
 ## Systemd Service
 
-In order to start mousehop with a graphical session automatically,
-the [systemd-service](service/mousehop.service) can be used:
+In order to start hopdeck with a graphical session automatically,
+the [systemd-service](service/hopdeck.service) can be used:
 
 Copy the file to `~/.config/systemd/user/` and enable the service:
 
 ```sh
-cp service/mousehop.service ~/.config/systemd/user
+cp service/hopdeck.service ~/.config/systemd/user
 systemctl --user daemon-reload
-systemctl --user enable --now mousehop.service
+systemctl --user enable --now hopdeck.service
 ```
 
-Choosing **Quit Mousehop** from the Linux tray stops the running user service
+Choosing **Quit HopDeck** from the Linux tray stops the running user service
 without disabling it. An enabled service therefore starts automatically again
 with the next graphical session.
 
 > [!Important]
-> Make sure to point `ExecStart=/usr/bin/mousehop daemon` to the actual `mousehop` binary (in case it is not under `/usr/bin`, e.g. when installed manually.
+> Make sure to point `ExecStart=/usr/bin/hopdeck daemon` to the actual `hopdeck` binary (in case it is not under `/usr/bin`, e.g. when installed manually.
 
 
 ## Configuration
-To automatically load clients on startup, the file `$XDG_CONFIG_HOME/mousehop/config.toml` is parsed.
+To automatically load clients on startup, the file `$XDG_CONFIG_HOME/hopdeck/config.toml` is parsed.
 `$XDG_CONFIG_HOME` defaults to `~/.config/`.
 
 To create this file you can copy the following example config:
@@ -423,7 +449,7 @@ To create this file you can copy the following example config:
 ### Example config
 > [!TIP]
 > key symbols in the release bind are named according
-> to their names in [input-event/src/scancode.rs#L172](input-event/src/scancode.rs#L176).
+> to their names in [crates/hopdeck-input-event/src/scancode.rs#L176](crates/hopdeck-input-event/src/scancode.rs#L176).
 > This is bound to change
 
 ```toml
@@ -452,7 +478,7 @@ access_password = "share-with-care"
 position = "right"
 # hostname
 hostname = "iridium"
-# activate this client immediately when mousehop is started
+# activate this client immediately when hopdeck is started
 activate_on_startup = true
 # optional list of (known) ip addresses
 ips = ["192.168.178.156"]
@@ -463,7 +489,7 @@ position = "left"
 # The hostname is optional: When no hostname is specified,
 # at least one ip address needs to be specified.
 hostname = "thorium"
-# ips are optional: peers running mousehop advertise every interface
+# ips are optional: peers running hopdeck advertise every interface
 # over mDNS, so a hostname alone discovers them all
 # optional port
 port = 4252
@@ -488,7 +514,7 @@ This is a one-way alias, not a swap. Physical Control continues to act
 as Control, while Command no longer acts as the peer's Super/Windows
 key for that client. The setting can also be enabled with
 `command_as_ctrl = true` on the corresponding `[[clients]]` entry and
-is ignored when mousehop is running on a non-macOS sender.
+is ignored when hopdeck is running on a non-macOS sender.
 
 ### Require a modifier to cross
 
@@ -496,7 +522,7 @@ Each outgoing client has an optional **Require Modifier to Cross** switch. When
 enabled, moving into that client's configured edge does nothing unless the
 selected modifier is currently held; with the modifier held, crossing behaves
 exactly like automatic crossing. Either the left or right key works. On
-backends that expose held-modifier state at the boundary, Mousehop checks it
+backends that expose held-modifier state at the boundary, HopDeck checks it
 before locking or hiding the pointer, so a blocked crossing rests at the local
 OS edge without a grab/release delay. This preflight is skipped entirely while
 the switch is off.
@@ -510,7 +536,7 @@ default is off, so existing clients retain automatic edge crossing.
 
 A peer with more than one address — e.g. a laptop wired *and* on Wi-Fi
 at the same time — advertises **every interface's** address over mDNS,
-so mousehop discovers them all without you pinning anything. By default
+so hopdeck discovers them all without you pinning anything. By default
 it races them and uses whichever connects first, which can flap onto a
 slow Wi-Fi path. The GUI's **Connection Address** dropdown lists every
 candidate as `<ip> — Wired/Wi-Fi · <latency>` (the interface kind is
@@ -527,7 +553,7 @@ offers:
   current network only**. The pin is sticky (no silent failover) and is
   scoped by a network fingerprint (the default-gateway MAC), so a pin
   set at home doesn't break connectivity on a different LAN — there,
-  mousehop falls back to the base `mode`.
+  hopdeck falls back to the base `mode`.
 
 `mode` persists on the `[[clients]]` entry; per-network pins persist
 under a `network_locks` table (keyed by network fingerprint, numeric
@@ -612,7 +638,7 @@ connect_mode = "reverse"
 activate_on_startup = true
 ```
 
-or with the CLI: `mousehop-cli set-connect-mode <id> reverse`. Peers behind a
+or with the CLI: `hopdeck cli set-connect-mode <id> reverse`. Peers behind a
 port forward / DNAT work with `direct` by pointing the client at the forwarded
 address — forward **UDP**, not just TCP (the transport is UDP+DTLS).
 
@@ -719,7 +745,7 @@ challenge on it to gate the stream).
 The GPUI console can view the picture: a device's detail page has a
 「画面 · 远程查看」 toggle that dials/hangs up the video channel
 (`SetVideoView` over the IPC socket). Frames ride a separate binary Unix
-socket (`mousehop-video.sock` next to the IPC socket) so the JSON state
+socket (`hopdeck-video.sock` next to the IPC socket) so the JSON state
 channel never carries pixels.
 
 The sharing side's master switch no longer requires editing config.toml:
@@ -738,7 +764,7 @@ a supported **input-emulation** *and* **input-capture** backend.
 
 A suitable backend is chosen automatically based on the active desktop environment / compositor.
 
-The following sections detail the emulation and capture backends provided by mousehop and their support in desktop environments / operating systems.
+The following sections detail the emulation and capture backends provided by hopdeck and their support in desktop environments / operating systems.
 
 ### Input Emulation Support
 
