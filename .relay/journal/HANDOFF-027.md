@@ -9,6 +9,7 @@ D42 四批路线的 **P1.2 视频共享端 UI 已实现、E2E 实证并提交（
 - **验收**：ipc 20 / daemon 115（含 video feature）/ console 18 全绿；clippy 三包净；E2E 六相位（findings #20）：落盘重启即绑 / 会话建立即宣告 offer / 观看 270 帧 lost=0 / 观看中关闭撤回链（A 收 "peer withdrew the offer"）/ 重开自动重拨 / VideoShare 线上形状。
 - **E2E 中抓到并修掉一个真 bug**：补发循环初版遍历 `incoming_conn_info`（只在 Entered 填充）→ 已连接未划入的会话收不到 offer；改 live_incoming 后复测全过。
 - **提交授权常态化（D48，公子原话「提交以后不用等我拍板，review和测试验证通过后就提交」）**——已存 memory `commit-after-green-tests`；今后批次完成即直接分账提交。
+- **P1.3 出站回写 peer_fingerprint（7af9eb7 fix(daemon)，D49）**：connect.rs `record_peer_fingerprint`（downcast DTLSConn→peer_certificates→generate_fingerprint→set_peer_fingerprint，dirty 由 2s sync tick 重广播、无需新事件）；挂点=直连/reverse 拨号（connected@ 后、reverse 分支前）+ adopt_inbound。E2E：A 拨 B 后 A 侧 Enumerate 实证 peer_fingerprint＝B 证书指纹（修复前恒空）；daemon 115 绿 clippy 净。设计取舍：出站 DTLS 不验证对端证书，记录所呈现身份与入站同语义；密码对端指纹也会记下（显未信任但指纹可见，更诚实）。
 
 ## 关键决策与死路
 - 热启停复用 `VideoHost::spawn`/`halt`（Host 本就不可失败、坏 bind 降级日志），不新增 daemon 状态机。
@@ -17,8 +18,9 @@ D42 四批路线的 **P1.2 视频共享端 UI 已实现、E2E 实证并提交（
 - 死路：遍历 incoming_conn_info 补发 offer（见上，live_incoming 替代）。
 
 ## 下一步精确动作
-- **P1.3 出站会话回写 peer_fingerprint（默认开工，无需拍板）**：D41④ 遗留——只有入站 Connected 写 ClientState.peer_fingerprint，拨号侧不写；预置授权条目地址过期时拨号侧显「未信任」。起点：`mousehop/src/connect.rs` 握手侧（DTLS verify 已知对端指纹）或 `MousehopConnection`（持有 client_manager）找到会话建立点回写 `set_peer_fingerprint` + 置 dirty（D20 的 client_states_dirty → 2s sync tick 自动重广播，无需新事件）；对照入站路径 service.rs Connected 臂的 `set_peer_fingerprint`。改完跑 daemon/console 测试 + 双实例 E2E（预授权互信下拨号侧详情应显「已信任」）。
-- 其余 P1 池排队：P1.4 Error toast + RemoteHostState 消费 / P1.5 断开会话 + 真拒绝 IPC。
+- **P1.4 Error toast + RemoteHostState 消费（下一批默认起点）**：daemon 推的 11 种事件 console 在 mod.rs 事件匹配 `_ => {}` 兜底丢弃（D42②）。最小集＝`FrontendEvent::Error`（查 ipc lib.rs 具体形状）弹 Notification toast + `RemoteHostState`（已有 recovery 事件回放，console 消费渲染远端锁定态）；改动集中在 `mousehop-console/src/console/mod.rs` 事件臂 + journal/通知，daemon 侧零改动。按 D48 授权完成即直接提交。
+- P1.5 断开会话 + 真拒绝 IPC：需 daemon 侧会话击杀语义（击杀路径设计），量级较大，宜新会话专门做。
+- 真机批次仍等公子安排（唯一外部依赖）。
 - 真机批次（Wayland portal 弹框 + RestoreToken + M2c 复验 + LAN 1080p）仍待公子安排——这是唯一等外部的事。
 - 环境注意：本机主 IP 已变 **192.168.101.16**（10.8.15.60 不再监听）；真机 uzero@10.8.15.62 不受影响。
 
