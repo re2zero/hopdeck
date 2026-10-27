@@ -26,6 +26,13 @@
 4. **跟进建议**：控制台 mDNS 发现列表/一键添加、接收端展示入站会话、显式“等待对方允许”状态并延长重试、README 写首次连接步骤。
 5. **现场恢复**：VM 临时授权已移除（`[authorized_fingerprints]` 为空）、测试 desktop entry 删除、桌面快捷方式保留；本机诊断 daemon 已停、`/tmp/hd-diag` 删除；本机 ApplicationManager 正常（195 个应用）。
 
+## 追加：desktop/图标简化（2026-10-28，D58）
+- **改名**：`apps/hopdeck/hopdeck.desktop`（原 `com.hopdeck.HopDeck.desktop`）+ `apps/hopdeck/assets/hopdeck.svg`（原 reverse-DNS 名）；desktop 精简为 Type/Name/Name[zh_CN]/Comment/Comment[zh_CN]/Exec/Icon/Terminal/Categories/StartupNotify/StartupWMClass，`Icon=hopdeck`。macOS bundle/libei 的内部 app id 仍是 `com.hopdeck.HopDeck`，未动。
+- **打包**：deb 安装 `/usr/share/applications/hopdeck.desktop` 与 `hicolor/{16,22,24,32,48,64,128,256,512}x*/apps/hopdeck.png` + `scalable/apps/hopdeck.svg`；AUR/Flatpak/release tarball/makeicns 全同步；Nix 的 `apps/hopdeck/*.desktop`/`assets/*.svg` wildcard 自动覆盖。
+- **迁移**：`desktop_install.rs` 首启写 `hopdeck.desktop`/`hopdeck.svg`，并每次启动删除旧 `com.hopdeck.HopDeck.*` 用户级副本（marker 存在也清）；deb postinst/postrm 删除旧系统级文件。
+- **验证**：desktop-file-validate、daemon 116、clippy `-D warnings`、fmt clean；隔离 XDG 首启安装/旧副本清理/系统 entry 存在时跳过三例通过；deb 重建后 VM `dpkg -i` 成功，旧文件消失，`dde-am --list` 出现 `hopdeck`，`dde-am hopdeck` 拉起 daemon+console，VM `~/Desktop/hopdeck.desktop` 已换新名/绝对 PNG 图标并可见。
+- **未解决**：VM 的 DDE 启动器搜索仍不显示 HopDeck（同机 Remmina/Fcitx5 也搜不到），是这台 VM 的启动器索引问题；桌面快捷方式与 `dde-am hopdeck` 可用。本机旧 deb 未重装（sudo 密码未知），需 `sudo apt install --reinstall ./target/deb/hopdeck_*.deb`。
+
 ## 下一步精确动作
 1. **P1.5 断开会话 + 真拒绝 IPC**（PLAN 唯一剩余 P1 项）：KillSession/RejectPeer 的会话击杀语义、踢 `live_incoming`/出站 conn、走 Disconnected 拆除链（含 video `stop_sending`）；详情「断开」按钮 + 认证卡「拒绝」；auth 冷却守卫。
 2. **可选：把 deb 纳入 release/CI**（若公子需要正式分发）：release.yml 增 Linux deb job，补签名/checksum/Lintian；当前脚本只服务本地联调。
