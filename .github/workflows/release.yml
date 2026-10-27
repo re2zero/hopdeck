@@ -52,8 +52,8 @@ jobs:
         mkdir "$stage"
         cp target/release/hopdeck \
            target/release/hopdeck-console \
-           apps/hopdeck/com.hopdeck.HopDeck.desktop \
-           apps/hopdeck/assets/com.hopdeck.HopDeck.svg \
+           apps/hopdeck/hopdeck.desktop \
+           apps/hopdeck/assets/hopdeck.svg \
            LICENSE NOTICE \
            "$stage/"
         tar -czf "${stage}.tar.gz" "$stage"
@@ -87,8 +87,8 @@ jobs:
         mkdir "$stage"
         cp target/release/hopdeck \
            target/release/hopdeck-console \
-           apps/hopdeck/com.hopdeck.HopDeck.desktop \
-           apps/hopdeck/assets/com.hopdeck.HopDeck.svg \
+           apps/hopdeck/hopdeck.desktop \
+           apps/hopdeck/assets/hopdeck.svg \
            LICENSE NOTICE \
            "$stage/"
         tar -czf "${stage}.tar.gz" "$stage"

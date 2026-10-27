@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hard break).
 - Workspace layout moved to `apps/` (executables) and `crates/`
   (libraries); this crate now lives in `apps/hopdeck`.
+- The installed desktop entry and icon are now `hopdeck.desktop` and
+  `hopdeck.svg` (previously reverse-DNS `com.hopdeck.HopDeck.*`); the
+  reverse-DNS app id remains for the macOS bundle and libei, and older
+  user-level entries are removed on first launch.
 
 ## [0.17.1](https://github.com/jondkinney/mousehop/compare/v0.17.0...v0.17.1) - 2026-09-05
 

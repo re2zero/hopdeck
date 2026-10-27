@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=HopDeck
+Name[zh_CN]=桌联
+Comment=Mouse & keyboard sharing via LAN
+Comment[zh_CN]=在局域网内共享鼠标、键盘与剪贴板
+Exec=hopdeck
+Icon=hopdeck
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=hopdeck-console

@@ -30,10 +30,10 @@ package() {
   cd "$srcdir/$_pkgname-$pkgver-$CARCH"
   install -Dm755 hopdeck "$pkgdir/usr/bin/hopdeck"
   install -Dm755 hopdeck-console "$pkgdir/usr/bin/hopdeck-console"
-  install -Dm644 com.hopdeck.HopDeck.desktop \
-    "$pkgdir/usr/share/applications/com.hopdeck.HopDeck.desktop"
-  install -Dm644 com.hopdeck.HopDeck.svg \
-    "$pkgdir/usr/share/icons/hicolor/scalable/apps/com.hopdeck.HopDeck.svg"
+  install -Dm644 hopdeck.desktop \
+    "$pkgdir/usr/share/applications/hopdeck.desktop"
+  install -Dm644 hopdeck.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/hopdeck.svg"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
 }

@@ -13,7 +13,7 @@ usage: $0 [APP_SVG [ICNS [ICONSET]]]
 
 ARGUMENTS
     APP_SVG  The app icon SVG (a self-contained rounded tile)
-             Defaults to ./apps/hopdeck/assets/com.hopdeck.HopDeck.svg
+             Defaults to ./apps/hopdeck/assets/hopdeck.svg
     ICNS     The icns file to create
              Defaults to ./target/icon.icns
     ICONSET  The iconset directory to create
@@ -27,7 +27,7 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     exit 0
 fi
 
-app_svg="${1:-./apps/hopdeck/assets/com.hopdeck.HopDeck.svg}"
+app_svg="${1:-./apps/hopdeck/assets/hopdeck.svg}"
 icns="${2:-./target/icon.icns}"
 iconset="${3:-./target/icon.iconset}"
 

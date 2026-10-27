@@ -64,7 +64,7 @@ modules:
       - cargo build --release -p hopdeck-console
       - install -Dm0755 target/release/hopdeck /app/bin/hopdeck
       - install -Dm0755 target/release/hopdeck-console /app/bin/hopdeck-console
-      - install -Dm0644 apps/hopdeck/assets/com.hopdeck.HopDeck.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - install -Dm0644 apps/hopdeck/assets/hopdeck.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
       # Render a hicolor PNG ladder from the source SVG so hosts
        # that prefer fixed-size raster icons (older toolkits, certain
        # KDE variants) get a sharp render without scaling the SVG at
@@ -73,13 +73,21 @@ modules:
         for size in 16 22 24 32 48 64 128 256 512; do
           install -d ${FLATPAK_DEST}/share/icons/hicolor/${size}x${size}/apps
           rsvg-convert -w $size -h $size \
-            apps/hopdeck/assets/com.hopdeck.HopDeck.svg \
+            apps/hopdeck/assets/hopdeck.svg \
             -o ${FLATPAK_DEST}/share/icons/hicolor/${size}x${size}/apps/${FLATPAK_ID}.png
         done
-      - install -Dm0644 apps/hopdeck/com.hopdeck.HopDeck.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      # The source entry uses the simple `hopdeck` name; Flatpak requires
+      # the desktop file and icon to carry the reverse-DNS app id.
+      - |
+        sed "s/^Icon=hopdeck$/Icon=${FLATPAK_ID}/" apps/hopdeck/hopdeck.desktop > /tmp/hopdeck.desktop
+        install -Dm0644 /tmp/hopdeck.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       # AppStream metainfo — required by Flathub, also picked up by
       # GNOME Software / KDE Discover for sideloaded bundles.
-      - install -Dm0644 build-aux/com.hopdeck.HopDeck.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - |
+        sed -e "s|<icon type=\"stock\">hopdeck</icon>|<icon type=\"stock\">${FLATPAK_ID}</icon>|" \
+            -e "s|<launchable type=\"desktop-id\">hopdeck.desktop</launchable>|<launchable type=\"desktop-id\">${FLATPAK_ID}.desktop</launchable>|" \
+            build-aux/com.hopdeck.HopDeck.metainfo.xml > /tmp/hopdeck.metainfo.xml
+        install -Dm0644 /tmp/hopdeck.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
     sources:
       - type: dir
         path: ..

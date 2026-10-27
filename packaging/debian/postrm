@@ -1,6 +1,19 @@
 #!/bin/sh
 set -e
 
+# Best-effort cleanup for installs upgraded from <=0.17.1 (reverse-DNS
+# desktop/icon names). On a normal removal dpkg has already deleted the
+# current names; this only catches leftovers on read-only /usr systems.
+remove_legacy_desktop_integration() {
+    rm -f /usr/share/applications/com.hopdeck.HopDeck.desktop 2>/dev/null || true
+    rm -f /usr/share/icons/hicolor/scalable/apps/com.hopdeck.HopDeck.svg 2>/dev/null || true
+    for size in 16 22 24 32 48 64 128 256 512; do
+        rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/com.hopdeck.HopDeck.png" \
+            2>/dev/null || true
+    done
+}
+remove_legacy_desktop_integration
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
 fi

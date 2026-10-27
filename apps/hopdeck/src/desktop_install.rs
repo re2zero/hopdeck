@@ -19,14 +19,20 @@ use std::path::PathBuf;
 
 /// App icon and desktop entry, embedded into the binary so the install
 /// works from a `cargo install`ed binary with no repo checkout present.
-/// `assets/com.hopdeck.HopDeck.svg` is the single icon source; packaging
-/// (Flatpak, Nix, release tarballs) installs the same file.
-const ICON_SVG: &[u8] = include_bytes!("../assets/com.hopdeck.HopDeck.svg");
-const DESKTOP_ENTRY: &str = include_str!("../com.hopdeck.HopDeck.desktop");
+/// `assets/hopdeck.svg` is the single icon source; packaging (Flatpak,
+/// Nix, release tarballs) installs the same file.
+const ICON_SVG: &[u8] = include_bytes!("../assets/hopdeck.svg");
+const DESKTOP_ENTRY: &str = include_str!("../hopdeck.desktop");
 
-/// HopDeck's reverse-DNS app id — the basename of the desktop entry
-/// (`.desktop`) and, with an `.svg` suffix, the icon.
-const APP_ID: &str = "com.hopdeck.HopDeck";
+/// Basename of the installed desktop entry and icon. Deliberately simple
+/// so launchers resolve `Icon=hopdeck` without reverse-DNS parsing; the
+/// macOS bundle/libei app id stays `com.hopdeck.HopDeck`.
+const DESKTOP_ID: &str = "hopdeck";
+const ICON_NAME: &str = "hopdeck";
+
+/// Pre-0.18 reverse-DNS names. Older builds wrote a user-level copy with
+/// these names, which would shadow the packaged `hopdeck.desktop`.
+const LEGACY_DESKTOP_ID: &str = "com.hopdeck.HopDeck";
 
 /// Binary name written into the desktop entry's `Exec=` line. Rewritten
 /// to the running executable's absolute path so a launcher's PATH-less
@@ -65,21 +71,21 @@ fn xdg_state_home() -> io::Result<PathBuf> {
 fn install() -> io::Result<()> {
     let data = xdg_data_home()?;
 
-    // Icon → icons/hicolor/scalable/apps/<app-id>.svg, so the desktop
-    // entry's `Icon=com.hopdeck.HopDeck` resolves by name.
+    // Icon → icons/hicolor/scalable/apps/hopdeck.svg, so the desktop
+    // entry's `Icon=hopdeck` resolves by name.
     let icon_dir = data.join("icons/hicolor/scalable/apps");
     std::fs::create_dir_all(&icon_dir)?;
-    let icon_path = icon_dir.join(format!("{APP_ID}.svg"));
+    let icon_path = icon_dir.join(format!("{ICON_NAME}.svg"));
     std::fs::write(&icon_path, ICON_SVG)?;
 
-    // Desktop entry → applications/<app-id>.desktop, with `Exec=` rewritten
+    // Desktop entry → applications/hopdeck.desktop, with `Exec=` rewritten
     // to this binary's absolute path: `cargo install` drops it in
     // ~/.cargo/bin, which a launcher's environment may not have on PATH.
     let app_dir = data.join("applications");
     std::fs::create_dir_all(&app_dir)?;
     let exe = std::env::current_exe()?.display().to_string();
     let entry = DESKTOP_ENTRY.replace(&format!("Exec={BINARY_NAME}\n"), &format!("Exec={exe}\n"));
-    let entry_path = app_dir.join(format!("{APP_ID}.desktop"));
+    let entry_path = app_dir.join(format!("{DESKTOP_ID}.desktop"));
     std::fs::write(&entry_path, entry)?;
 
     Ok(())
@@ -94,7 +100,25 @@ fn packaged_entry_exists() -> bool {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-    std::env::split_paths(&dirs).any(|d| d.join(format!("applications/{APP_ID}.desktop")).is_file())
+    std::env::split_paths(&dirs).any(|d| {
+        d.join(format!("applications/{DESKTOP_ID}.desktop"))
+            .is_file()
+    })
+}
+
+/// Remove the old reverse-DNS user-level entry/icon written by earlier
+/// builds. Runs on every launch (not just the first) so an upgrade from
+/// an older binary clears the shadowing copy even though its install
+/// marker already exists. Best-effort: a packaged install may also
+/// clean these via its postinst.
+fn cleanup_legacy() {
+    let Ok(data) = xdg_data_home() else {
+        return;
+    };
+    let _ = std::fs::remove_file(data.join(format!("applications/{LEGACY_DESKTOP_ID}.desktop")));
+    let _ = std::fs::remove_file(data.join(format!(
+        "icons/hicolor/scalable/apps/{LEGACY_DESKTOP_ID}.svg"
+    )));
 }
 
 /// Install the desktop integration silently on the first normal launch,
@@ -117,6 +141,10 @@ fn try_ensure_first_launch() -> io::Result<()> {
         return Ok(());
     }
 
+    // Remove a pre-rename user copy even when the install marker below
+    // says the one-time step already ran.
+    cleanup_legacy();
+
     // The marker means the one-time first-launch step is already done.
     let state = xdg_state_home()?;
     let marker_dir = state.join(env!("CARGO_PKG_NAME"));
@@ -127,7 +155,7 @@ fn try_ensure_first_launch() -> io::Result<()> {
 
     // Install only if nothing already provides the entry — neither an
     // earlier run of this nor a system package.
-    let user_entry = xdg_data_home()?.join(format!("applications/{APP_ID}.desktop"));
+    let user_entry = xdg_data_home()?.join(format!("applications/{DESKTOP_ID}.desktop"));
     if !user_entry.exists() && !packaged_entry_exists() {
         install()?;
     }

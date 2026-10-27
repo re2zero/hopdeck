@@ -140,14 +140,14 @@ sudo cp path/to/hopdeck path/to/hopdeck-console /usr/local/bin/
 
 # install app icon
 sudo mkdir -p /usr/local/share/icons/hicolor/scalable/apps
-sudo cp apps/hopdeck/assets/com.hopdeck.HopDeck.svg /usr/local/share/icons/hicolor/scalable/apps
+sudo cp apps/hopdeck/assets/hopdeck.svg /usr/local/share/icons/hicolor/scalable/apps
 
 # update icon cache
 update-icon-caches /usr/local/share/icons/hicolor/
 
 # install desktop entry
 sudo mkdir -p /usr/local/share/applications
-sudo cp apps/hopdeck/com.hopdeck.HopDeck.desktop /usr/local/share/applications
+sudo cp apps/hopdeck/hopdeck.desktop /usr/local/share/applications
 
 # when using firewalld: install firewall rule
 sudo cp firewall/hopdeck.xml /etc/firewalld/services
@@ -176,10 +176,12 @@ packaging/debian/build-deb.sh
 sudo apt install ./target/deb/hopdeck_*_amd64.deb
 ```
 The package installs `/usr/bin/hopdeck` and `/usr/bin/hopdeck-console`, the
-desktop entry, the icon, and AppStream metadata. If a test binary run from
-`/tmp` left a user-local `~/.local/share/applications/com.hopdeck.HopDeck.desktop`
-behind, remove it — the user copy shadows the system entry and may point at a
-deleted binary.
+desktop entry (`/usr/share/applications/hopdeck.desktop`), the icon
+(`/usr/share/icons/hicolor/.../hopdeck.*`), and AppStream metadata. Older
+builds used reverse-DNS names (`com.hopdeck.HopDeck.desktop`); the app removes
+that old user-local copy on launch, but a stale `hopdeck.desktop` left by a
+test binary should be deleted — a user copy shadows the system entry and may
+point at a deleted binary.
 
 ### Compiling and installing via cargo:
 ```sh

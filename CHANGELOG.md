@@ -10,12 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Renamed the project from Mousehop to HopDeck（桌联）. Crate names, the
-  binary, app id (`com.hopdeck.HopDeck`), desktop/icon/service names,
+  binary, app id (`com.hopdeck.HopDeck`), service names,
   config and state paths, IPC/video socket names, environment variables
   (`HOPDECK_*`), and the mDNS service type (`_hopdeck._udp.local.`) all
   moved. Ports and event serialization are unchanged, but the `Hello`
   protocol magic is now `HOPDECK\0`, so Mousehop peers are rejected
   (deliberate hard break).
+- Simplified the installed desktop entry and icon names to `hopdeck.desktop`
+  and `hopdeck.svg` (previously reverse-DNS `com.hopdeck.HopDeck.*`). The
+  reverse-DNS app id remains for the macOS bundle and libei; older user-level
+  entries are removed on first launch.
 - Restructured the workspace: libraries live under `crates/`, shipped
   executables under `apps/`. Application identity types moved to
   `hopdeck-input-event`, removing the capture layer's dependency on the

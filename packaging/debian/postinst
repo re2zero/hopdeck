@@ -1,6 +1,20 @@
 #!/bin/sh
 set -e
 
+# <=0.17.1 installed reverse-DNS desktop/icon names. dpkg does not remove
+# files that the new package no longer owns on upgrade, and the stale
+# entry would keep pointing at an old icon. Best-effort: /usr may be a
+# read-only overlay on immutable UOS systems.
+remove_legacy_desktop_integration() {
+    rm -f /usr/share/applications/com.hopdeck.HopDeck.desktop 2>/dev/null || true
+    rm -f /usr/share/icons/hicolor/scalable/apps/com.hopdeck.HopDeck.svg 2>/dev/null || true
+    for size in 16 22 24 32 48 64 128 256 512; do
+        rm -f "/usr/share/icons/hicolor/${size}x${size}/apps/com.hopdeck.HopDeck.png" \
+            2>/dev/null || true
+    done
+}
+remove_legacy_desktop_integration
+
 if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database -q /usr/share/applications || true
 fi

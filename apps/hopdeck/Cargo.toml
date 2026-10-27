@@ -11,8 +11,8 @@ include = [
     # First-launch desktop install (see src/desktop_install.rs) embeds
     # these two files into the binary via include_bytes! / include_str!,
     # so they must ship in the published crate.
-    "com.hopdeck.HopDeck.desktop",
-    "assets/com.hopdeck.HopDeck.svg",
+    "hopdeck.desktop",
+    "assets/hopdeck.svg",
 ]
 
 [build-dependencies]

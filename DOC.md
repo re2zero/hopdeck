@@ -34,7 +34,8 @@ reject each other. Every user-visible namespace moved:
 |---------|-----|-----|
 | binary | `mousehop` | `hopdeck` |
 | console binary | — | `hopdeck-console` |
-| app id / desktop / icon | `com.mousehop.Mousehop` | `com.hopdeck.HopDeck` |
+| bundle / libei app id | `com.mousehop.Mousehop` | `com.hopdeck.HopDeck` |
+| desktop entry / icon | `com.mousehop.Mousehop` | `hopdeck` |
 | config dir | `$XDG_CONFIG_HOME/mousehop/` | `$XDG_CONFIG_HOME/hopdeck/` |
 | certificate file | `mousehop.pem` | `hopdeck.pem` |
 | IPC / video sockets | `mousehop-*.sock` | `hopdeck-*.sock` |

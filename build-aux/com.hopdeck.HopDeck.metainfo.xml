@@ -7,8 +7,8 @@
   <name xml:lang="zh_CN">桌联</name>
   <summary>Share one mouse, keyboard, and clipboard across machines</summary>
   <summary xml:lang="zh_CN">在局域网内共享鼠标、键盘与剪贴板</summary>
-  <icon type="stock">com.hopdeck.HopDeck</icon>
-  <launchable type="desktop-id">com.hopdeck.HopDeck.desktop</launchable>
+  <icon type="stock">hopdeck</icon>
+  <launchable type="desktop-id">hopdeck.desktop</launchable>
   <description>
     <p>
       HopDeck (桌联) is an open-source software KVM. Glide a single mouse, keyboard, and

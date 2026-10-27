@@ -67,10 +67,10 @@ install -d \
 
 install -m 0755 target/release/hopdeck "$stage/usr/bin/hopdeck"
 install -m 0755 target/release/hopdeck-console "$stage/usr/bin/hopdeck-console"
-install -m 0644 apps/hopdeck/com.hopdeck.HopDeck.desktop \
-    "$stage/usr/share/applications/com.hopdeck.HopDeck.desktop"
-install -m 0644 apps/hopdeck/assets/com.hopdeck.HopDeck.svg \
-    "$stage/usr/share/icons/hicolor/scalable/apps/com.hopdeck.HopDeck.svg"
+install -m 0644 apps/hopdeck/hopdeck.desktop \
+    "$stage/usr/share/applications/hopdeck.desktop"
+install -m 0644 apps/hopdeck/assets/hopdeck.svg \
+    "$stage/usr/share/icons/hicolor/scalable/apps/hopdeck.svg"
 install -m 0644 build-aux/com.hopdeck.HopDeck.metainfo.xml \
     "$stage/usr/share/metainfo/com.hopdeck.HopDeck.metainfo.xml"
 install -m 0644 LICENSE NOTICE "$stage/usr/share/doc/hopdeck/"
@@ -85,8 +85,8 @@ if command -v rsvg-convert >/dev/null 2>&1; then
         dir="$stage/usr/share/icons/hicolor/${size}x${size}/apps"
         install -d "$dir"
         rsvg-convert -w "$size" -h "$size" \
-            apps/hopdeck/assets/com.hopdeck.HopDeck.svg \
-            -o "$dir/com.hopdeck.HopDeck.png"
+            apps/hopdeck/assets/hopdeck.svg \
+            -o "$dir/hopdeck.png"
     done
 else
     echo "warning: rsvg-convert not found; installing the SVG icon only" >&2
