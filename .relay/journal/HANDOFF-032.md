@@ -19,6 +19,13 @@
 - **VM 现状**：已安装 `hopdeck 0.17.1`（amd64）；`~/.config/hopdeck/` 只保留证书，测试 config 已备份为 `config.toml.test-run`；下次启动会生成干净配置。
 - **环境**：VM 有 `dde-am`、`gio`、`dpkg-deb`、`desktop-file-validate`，无 `wmctrl`/`scrot`；截图用 `ffmpeg -f x11grab`；SSH key 免密，sudo 密码 1。
 
+## 追加诊断（2026-10-28，公子反馈三问题）
+1. **apt 重启服务提示**：本机装了 `needrestart 3.11`，`$nrconf{restart} = 'i'`，每次 apt 事务后交互式扫描“使用旧库的服务”；hopdeck deb 没有 systemd unit，postinst 只刷新 desktop/icon 缓存；VM 无 needrestart 所以不提示。跳过用 `NEEDRESTART_SUSPEND=1` 或回答 No。
+2. **VM 桌面无图标**：deb 只装应用菜单入口，不建桌面快捷方式。VM 的 DDE 启动器搜索不索引第三方应用——HopDeck、Remmina、Fcitx5 都“无搜索结果”，但 `org.desktopspec.ApplicationManager1` 里有完整 HopDeck 条目（`DesktopSourcePath=/usr/share/applications/com.hopdeck.HopDeck.desktop`、`NoDisplay=false`、图标/分类正常）；VM 的 `/usr` 是只读 overlay，本机与 VM 都没有 `/etc/xdg/menus`。已在 VM `~/Desktop/com.hopdeck.HopDeck.desktop` 放绝对图标路径的「桌联」快捷方式（`Exec=/usr/bin/hopdeck`，chmod +x），桌面实测可见；`hopdeck`/`dde-am com.hopdeck.HopDeck` 始终可用。本机旧用户级 entry 指向 `target/debug/hopdeck`，已备份到 `/tmp/hd-local-desktop-backup/` 并删除；ApplicationManager 重启后指向系统 entry（195 个应用，正常）。
+3. **无相互发现/搜索连不上**：mDNS 实测正常（本地调试实例收到 `tt-v25`，192.168.101.74:4252），但 `handle_discovery_event` 只把地址补进“已配置且 hostname 匹配”的客户端，不新增设备；控制台空列表的「未发现设备」= 未添加设备。本机配置遗留 `ips=["192.168.101.104"]`（不可达；VM 是 `.74`），控制台搜索已存在 IP 只选中、不拨号。首次连接必须在接收端点「远程设备请求连接」的「允许连接」；未允许前控制端 `Alert is Fatal or Close Notify`，允许后立即 `client (0) connected @ 192.168.101.74:4252` 并回写 `f9:f5:34...`。控制台重试 10×3s，超时再回车；双向需两端各自授权。入站会话在接收端列表仍显示「设备 0 台」（incoming 只刷新已配置客户端）。
+4. **跟进建议**：控制台 mDNS 发现列表/一键添加、接收端展示入站会话、显式“等待对方允许”状态并延长重试、README 写首次连接步骤。
+5. **现场恢复**：VM 临时授权已移除（`[authorized_fingerprints]` 为空）、测试 desktop entry 删除、桌面快捷方式保留；本机诊断 daemon 已停、`/tmp/hd-diag` 删除；本机 ApplicationManager 正常（195 个应用）。
+
 ## 下一步精确动作
 1. **P1.5 断开会话 + 真拒绝 IPC**（PLAN 唯一剩余 P1 项）：KillSession/RejectPeer 的会话击杀语义、踢 `live_incoming`/出站 conn、走 Disconnected 拆除链（含 video `stop_sending`）；详情「断开」按钮 + 认证卡「拒绝」；auth 冷却守卫。
 2. **可选：把 deb 纳入 release/CI**（若公子需要正式分发）：release.yml 增 Linux deb job，补签名/checksum/Lintian；当前脚本只服务本地联调。
