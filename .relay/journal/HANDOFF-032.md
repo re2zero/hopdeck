@@ -1,0 +1,32 @@
+# HANDOFF-032（会话 #25 → 会话 #26）
+会话：#25  日期：2026-10-27  基线：`feat/usbip-emulation@98e46af`（本次提交后）
+
+## 一句话状态
+按公子要求补齐 **Debian/UOS 本地打包**：新增 `packaging/debian/build-deb.sh`，一条命令产出含 daemon/CLI + GPUI console + desktop 入口 + 图标 + AppStream 元数据的 `.deb`（12MB，安装后约 43MB）。已在 UOS 25 VM 上 `dpkg -i` 安装，用 DDE 的 `dde-am com.hopdeck.HopDeck` 按菜单方式启动成功，并与本机 release 版完成双向直连（两端控制台 0.2–0.3ms 在线）。桌面文件之前点不开的根因是：旧的用户级 entry 指向 `/tmp` 里的测试二进制，而该目录没有配套 `hopdeck-console`。
+
+## 已完成（含证据）
+- **桌面文件失败根因**：VM 的 `~/.local/share/applications/com.hopdeck.HopDeck.desktop` 由早期 `/tmp` 测试二进制首启生成，`Exec=/tmp/hd-rm/vm/hopdeck`，同目录无 `hopdeck-console`，启动器报 “not found next to …”。已备份到 `~/hopdeck-deb-backup/` 并从用户目录移除，避免它继续覆盖系统 entry。
+- **deb 打包**：`packaging/debian/` 新增 `build-deb.sh`、`postinst`、`postrm`、`copyright`。脚本从 `Cargo.toml` 读版本、`dpkg --print-architecture` 取架构；按 ashpd 约束分两次构建 release；stages `/usr/bin/{hopdeck,hopdeck-console}`、桌面入口、SVG + 16–512 PNG 图标梯、metainfo、LICENSE/NOTICE/copyright/changelog；`dpkg-deb --root-owner-group -Zxz` 产出 `target/deb/hopdeck_<ver>_<arch>.deb`。`--skip-build` 可复用已有 release 二进制。
+- **桌面入口**：`apps/hopdeck/com.hopdeck.HopDeck.desktop` 增 `StartupWMClass=hopdeck-console`，避免任务栏把 launcher 与 console 窗口识别成两个应用；`desktop-file-validate` 通过。
+- **VM 安装与启动**：`scp` + `sudo dpkg -i` 成功；`dde-am com.hopdeck.HopDeck` 拉起 launcher/`hopdeck daemon`/`hopdeck-console` 三进程，窗口、`/run/user/1000/hopdeck-socket.sock`、UDP 4252 全部正常；截图确认控制台渲染。
+- **与本机 release 联调**：本机 Xvfb 上跑 `target/release/hopdeck`，VM 跑安装后的 `/usr/bin/hopdeck`；双方 IPC `AuthorizeKey` 后本机 `ConnectTo`，再让 VM 反向 `ConnectTo` 本机；两端 Sync 均 `alive=true`，控制台显示在线（0.2–0.3ms）。VM 端 Auth 对话框通过真实点击「允许连接」关闭，验证 UI 授权路径。
+- **验收**：`desktop-file-validate` 通过；daemon 116 测试绿；fmt clean；deb 安装/卸载路径和 postinst 桌面缓存刷新已在 VM 实测；测试结束后两端进程全退、VM 测试配置移到 `~/hopdeck-deb-backup/config.toml.test-run`、证书保留。
+
+## 关键决策与环境事实
+- **deb 是本地测试包，不是发布链**：脚本未接入 GitHub release/CI，也未做 gpg 签名、Lintian、多架构、Debian source package。默认特性构建（不含 `video`/`video_portal`）；需要画面共享时自行 `cargo build --release --features video,video_portal` 后再跑 `--skip-build`。
+- **用户级 desktop 会覆盖系统级**：`~/.local/share/applications` 优先于 `/usr/share/applications`。任何从 `/tmp` 或旧路径跑过的首启残留都必须删除，README 已写明。
+- **VM 启动方式**：UOS 开始菜单搜「桌联」/HopDeck，终端直接 `hopdeck`；`dde-am com.hopdeck.HopDeck` 等价于菜单启动。旧 `/tmp` 二进制的桌面文件已不再生效。
+- **VM 现状**：已安装 `hopdeck 0.17.1`（amd64）；`~/.config/hopdeck/` 只保留证书，测试 config 已备份为 `config.toml.test-run`；下次启动会生成干净配置。
+- **环境**：VM 有 `dde-am`、`gio`、`dpkg-deb`、`desktop-file-validate`，无 `wmctrl`/`scrot`；截图用 `ffmpeg -f x11grab`；SSH key 免密，sudo 密码 1。
+
+## 下一步精确动作
+1. **P1.5 断开会话 + 真拒绝 IPC**（PLAN 唯一剩余 P1 项）：KillSession/RejectPeer 的会话击杀语义、踢 `live_incoming`/出站 conn、走 Disconnected 拆除链（含 video `stop_sending`）；详情「断开」按钮 + 认证卡「拒绝」；auth 冷却守卫。
+2. **可选：把 deb 纳入 release/CI**（若公子需要正式分发）：release.yml 增 Linux deb job，补签名/checksum/Lintian；当前脚本只服务本地联调。
+3. **真机默认启动验证**：Wayland portal picker 仍未验；无 Vulkan 老 GPU 的 GPUI 花屏缓解（D31⑤）仍开放。
+4. **沿用**：USB-IP 注入复验、键盘真实采集源（X11 采集未实现）。
+
+## 上下文指针
+- 本次提交：`packaging/debian/`、README 打包章节、desktop `StartupWMClass`。
+- 计划：`.relay/PLAN.md`（会话#25 / D56）；上篇 HANDOFF-031（GTK→GPUI + 入站在线修复）。
+- 本地产物：`target/deb/hopdeck_0.17.1_amd64.deb`；VM 安装包同名。
+- 测试配方：`packaging/debian/build-deb.sh`（构建）/ `--skip-build`（仅打包）；daemon 测试 `cargo test --workspace --exclude hopdeck-console --all-features`。
