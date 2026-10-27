@@ -10,5 +10,8 @@ Name[en_US]=HopDeck
 Name=HopDeck
 Name[zh_CN]=桌联
 StartupNotify=true
+# The GPUI window's app id / WM_CLASS. Without this, taskbars show the
+# launcher and the console window as two separate applications.
+StartupWMClass=hopdeck-console
 Terminal=false
 Type=Application

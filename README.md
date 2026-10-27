@@ -167,6 +167,20 @@ cargo build --release -p hopdeck-console
 sudo cp target/release/hopdeck target/release/hopdeck-console /usr/local/bin/
 ```
 
+### Building a .deb (Debian / Ubuntu / UOS):
+```sh
+# builds both release binaries (unless --skip-build) and stages the package
+packaging/debian/build-deb.sh
+
+# install the generated package
+sudo apt install ./target/deb/hopdeck_*_amd64.deb
+```
+The package installs `/usr/bin/hopdeck` and `/usr/bin/hopdeck-console`, the
+desktop entry, the icon, and AppStream metadata. If a test binary run from
+`/tmp` left a user-local `~/.local/share/applications/com.hopdeck.HopDeck.desktop`
+behind, remove it — the user copy shadows the system entry and may point at a
+deleted binary.
+
 ### Compiling and installing via cargo:
 ```sh
 # will end up in ~/.cargo/bin

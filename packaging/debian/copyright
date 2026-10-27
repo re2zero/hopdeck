@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: hopdeck
+Upstream-Contact: re2zero <re2zero@users.noreply.github.com>
+Source: https://github.com/re2zero/hopdeck
+
+Files: *
+Copyright: 2026 the HopDeck contributors
+License: GPL-3.0-or-later
+ On Debian systems, the complete text of the GNU General Public License
+ version 3 can be found in /usr/share/common-licenses/GPL-3.
