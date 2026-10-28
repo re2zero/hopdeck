@@ -17,7 +17,9 @@ The workspace splits reusable libraries from shipped executables:
 | `crates/hopdeck-cli` | `hopdeck-cli` | CLI frontend library |
 
 The data path is `hopdeck-input-capture` → daemon → `hopdeck-proto` over
-UDP+DTLS → daemon → `hopdeck-input-emulation`. The control path is
+UDP+DTLS → daemon → `hopdeck-input-emulation`, with TLS 1.3 over TCP on the
+same port as a transport fallback (see
+[Transport fallback](#transport-fallback-udp--tcp)). The control path is
 frontends ↔ `hopdeck-ipc` ↔ daemon. `hopdeck-input-capture` depends only on
 `hopdeck-input-event`; application identity types (`AppIdent`, `HostKind`,
 `RunningApp`) live there so the capture layer never depends on the frontend
@@ -145,6 +147,46 @@ Wire impact: three fixed-size event tags appended (26–28);
 `MAX_EVENT_SIZE` raised to 33 bytes to fit the 32-byte auth payloads.
 Serialization of existing events is unchanged — no protocol version bump.
 
+
+## Transport fallback (UDP → TCP)
+
+The input/control session is one protocol with two transports. UDP+DTLS is the
+default and the lower-latency path. On networks that drop UDP in one direction
+(managed switches, policy gateways, NAT that only forwards TCP) the peer is
+reachable but never answers a DTLS handshake, so the same session is carried
+over TLS 1.3 on a TCP stream at the **same port**.
+
+Rules of the design:
+
+- **No DTLS over TCP.** TCP is a byte stream; each protocol frame is prefixed
+  with a `u32` big-endian length and then handed to a `webrtc_util::Conn`
+  adapter (`apps/hopdeck/src/tcp_transport.rs`). The session layer above —
+  `Hello`, `Ping`/`Pong`, the access-password challenge, handover, replies —
+  is transport-agnostic and the wire format is unchanged.
+- **Frame bounds.** A payload above `MAX_CLIPBOARD_SIZE` (the widest frame the
+  protocol defines) is a protocol violation: the connection is closed instead
+  of allocating. EOF is reported as an error, never `Ok(0)`, because both
+  receive loops treat a zero-length read as "nothing to do".
+- **Identity is unchanged.** rustls runs TLS 1.3 with mutual client
+  certificates and an accept-any chain verifier (the certificate is
+  self-signed, exactly like DTLS); identity is the pinned leaf fingerprint,
+  checked after the handshake against `authorized_fingerprints`, with the
+  access-password challenge as the fallback admission path. An unauthorized
+  peer with no password configured is refused and reported as a
+  `ConnectionAttempt`.
+- **Selection.** `transport = "auto"` (default) dials UDP with a ~2 s budget,
+  then TCP. A peer that answers and refuses us at the security layer is
+  reachable, so no fallback is attempted (no duplicate authorization prompts).
+  `"udp"` restores the historical behavior; `"tcp"` forces the framed path.
+  The last successful transport is cached per peer in memory so reconnects skip
+  the failed path; a daemon restart probes UDP again.
+- **Per-IP listeners.** Every local address binds UDP and TCP; a TCP bind
+  failure only logs a warning and leaves UDP serving. Each accepted TCP
+  connection runs its TLS handshake on its own task, so a slow client cannot
+  stall the accept loop.
+
+`ClientState.transport` reports the live session's transport; the console shows
+it next to the peer (Phase 2 wires the UI switch for the preference).
 
 ## Reverse Tunnel Forwarding (M2c)
 

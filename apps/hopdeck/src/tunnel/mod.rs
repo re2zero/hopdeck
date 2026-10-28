@@ -14,7 +14,7 @@ mod exit;
 mod forward;
 mod frames;
 mod rules;
-mod tls;
+pub(crate) mod tls;
 
 pub use exit::{ExitConfig, spawn as spawn_exit};
 pub use forward::{ForwardSpec, TargetAddr, spawn as spawn_forward};

@@ -15,7 +15,7 @@ use futures::StreamExt;
 use hopdeck_ipc::{
     AppIdent, AsyncFrontendListener, ClientConfig, ClientHandle, ConnectMode, ConnectionMode,
     DEFAULT_PORT, FrontendEvent, FrontendRequest, HostKind, IncomingPeerConfig, IpcError,
-    IpcListenerCreationError, Position, RemoteHostState, Status,
+    IpcListenerCreationError, Position, RemoteHostState, Status, TransportKind,
 };
 use hopdeck_proto::ProtoEvent;
 use input_capture::clipboard::{ClipboardMonitor, SuppressionList};
@@ -908,6 +908,7 @@ impl Service {
                     command_as_ctrl: c.command_as_ctrl,
                     require_crossing_modifier: c.require_crossing_modifier,
                     crossing_modifier: c.crossing_modifier,
+                    transport: c.transport,
                     tunnel_forwards,
                     tunnel_port,
                 }
@@ -999,6 +1000,15 @@ impl Service {
                 if self.live_incoming.get(&addr) == Some(&session) {
                     self.live_incoming.remove(&addr);
                 }
+                // Clear the display transport unless an outbound session
+                // to the same peer is still alive (it owns the label then).
+                if let Some(handle) = self.client_manager.get_client(addr) {
+                    if !self.client_manager.alive(handle)
+                        && self.client_manager.set_transport(handle, None)
+                    {
+                        self.broadcast_client(handle);
+                    }
+                }
                 self.refresh_incoming_flags();
                 // An input session died: stop streaming to whoever held the
                 // video channel, but keep the listener. Coarse by design
@@ -1040,6 +1050,7 @@ impl Service {
                 addr,
                 session,
                 fingerprint,
+                transport,
             } => {
                 // Accept itself replaces an inbound transport generation. If
                 // the previous generation had already created a return
@@ -1060,17 +1071,24 @@ impl Service {
                     recovery.addr = addr;
                 }
                 // Link the inbound session back to the configured
-                // client so frontends can show its trust state inline.
+                // client so frontends can show its trust state inline,
+                // and record which transport carried it.
                 if let Some(handle) = self.client_manager.get_client(addr) {
-                    if self
+                    let fingerprint_changed = self
                         .client_manager
-                        .set_peer_fingerprint(handle, Some(fingerprint.clone()))
-                    {
+                        .set_peer_fingerprint(handle, Some(fingerprint.clone()));
+                    let transport_changed =
+                        self.client_manager.set_transport(handle, Some(transport));
+                    if fingerprint_changed || transport_changed {
                         self.broadcast_client(handle);
                     }
                 }
-                self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
-                self.maybe_adopt_reverse_session(addr, session).await;
+                self.notify_frontend(FrontendEvent::DeviceConnected {
+                    addr,
+                    fingerprint: fingerprint.clone(),
+                });
+                self.maybe_adopt_reverse_session(addr, session, fingerprint, transport)
+                    .await;
                 // Track the live session for mid-run video announces;
                 // a replacement session overwrites the stale entry.
                 self.live_incoming.insert(addr, session);
@@ -1573,7 +1591,13 @@ impl Service {
     ///    which that client already adopted listener-side), or
     ///  - the client already has a live transport (adoption fills a
     ///    void; it never competes with an established session).
-    async fn maybe_adopt_reverse_session(&mut self, addr: SocketAddr, session: ListenerSession) {
+    async fn maybe_adopt_reverse_session(
+        &mut self,
+        addr: SocketAddr,
+        session: ListenerSession,
+        fingerprint: String,
+        transport: TransportKind,
+    ) {
         let Some(handle) = self.client_manager.get_client(addr) else {
             return;
         };
@@ -1604,7 +1628,9 @@ impl Service {
             log::debug!("reverse adoption of session {session} from {addr}: already gone");
             return;
         };
-        self.conn.adopt_inbound(handle, conn, addr).await;
+        self.conn
+            .adopt_inbound(handle, conn, addr, Some(fingerprint), transport)
+            .await;
     }
 
     /// Recompute the current-network fingerprint. On change, re-resolve

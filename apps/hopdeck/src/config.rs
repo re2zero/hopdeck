@@ -18,7 +18,7 @@ use toml_edit::{self, DocumentMut};
 use hopdeck_cli::CliArgs;
 use hopdeck_ipc::{
     ClipboardSuppression, ConnectMode, ConnectionMode, CrossingModifier, DEFAULT_PORT,
-    IncomingPeerConfig, Position,
+    IncomingPeerConfig, Position, TransportMode,
 };
 
 use crate::tunnel::{DEFAULT_TUNNEL_PORT, ForwardSpec, TargetAddr};
@@ -246,6 +246,11 @@ struct TomlClient {
     /// Port of this peer's tunnel exit. Absent → `tunnel::DEFAULT_TUNNEL_PORT`.
     #[serde(default)]
     tunnel_port: Option<u16>,
+    /// Preferred session transport (`auto` | `udp` | `tcp`). Absent in
+    /// legacy configs → `Auto` (UDP+DTLS, TLS over TCP as the
+    /// fallback). See [`hopdeck_ipc::TransportMode`].
+    #[serde(default)]
+    transport: Option<TransportMode>,
 }
 
 impl ConfigToml {
@@ -320,8 +325,8 @@ pub enum Command {
     Cli(CliArgs),
     /// run in daemon mode
     Daemon,
-    /// Add (or, with --remove, delete) a host-firewall rule allowing
-    /// hopdeck's UDP port inbound — for the detected firewall
+    /// Add (or, with --remove, delete) host-firewall rules allowing
+    /// hopdeck's UDP *and* TCP port inbound — for the detected firewall
     /// (ufw/firewalld/nftables/iptables on Linux, Windows Firewall).
     /// Run with sudo / as administrator.
     Firewall(FirewallArgs),
@@ -510,6 +515,9 @@ pub struct ConfigClient {
     /// Invalid entries are dropped with a warning, not a load error.
     pub tunnel_forwards: Vec<ForwardSpec>,
     pub tunnel_port: u16,
+    /// Preferred transport for the input session. Defaults to auto
+    /// (UDP first, TLS over TCP when UDP is unreachable).
+    pub transport: TransportMode,
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -554,6 +562,7 @@ impl From<TomlClient> for ConfigClient {
             crossing_modifier,
             tunnel_forwards,
             tunnel_port: toml.tunnel_port.unwrap_or(DEFAULT_TUNNEL_PORT),
+            transport: toml.transport.unwrap_or_default(),
         }
     }
 }
@@ -628,6 +637,9 @@ impl From<ConfigClient> for TomlClient {
                 .collect()
         });
         let tunnel_port = (client.tunnel_port != DEFAULT_TUNNEL_PORT).then_some(client.tunnel_port);
+        // Like the connection policy: an untouched peer keeps the implicit
+        // default instead of gaining a new key on save.
+        let transport = (client.transport != TransportMode::default()).then_some(client.transport);
         Self {
             hostname,
             host_name,
@@ -645,6 +657,7 @@ impl From<ConfigClient> for TomlClient {
             crossing_modifier,
             tunnel_forwards,
             tunnel_port,
+            transport,
         }
     }
 }
@@ -1095,6 +1108,7 @@ mod connection_mode_tests {
             crossing_modifier: CrossingModifier::default(),
             tunnel_forwards: Vec::new(),
             tunnel_port: DEFAULT_TUNNEL_PORT,
+            transport: TransportMode::Auto,
         }
     }
 
@@ -1195,6 +1209,51 @@ mod connection_mode_tests {
         assert_eq!(parsed.connect_mode, None);
         let cc: ConfigClient = parsed.into();
         assert_eq!(cc.connect_mode, ConnectMode::Direct);
+    }
+
+    #[test]
+    fn transport_roundtrips_and_defaults_to_auto() {
+        // Auto stays implicit in the persisted file.
+        let toml: TomlClient = client_with(ConnectionMode::default(), HashMap::new()).into();
+        assert_eq!(toml.transport, None);
+
+        for transport in [TransportMode::Udp, TransportMode::Tcp] {
+            let mut client = client_with(ConnectionMode::default(), HashMap::new());
+            client.transport = transport;
+            let toml: TomlClient = client.into();
+            assert_eq!(toml.transport, Some(transport));
+            let back: ConfigClient = toml.into();
+            assert_eq!(back.transport, transport);
+        }
+    }
+
+    #[test]
+    fn legacy_toml_without_transport_uses_auto() {
+        let parsed: TomlClient = toml::from_str(
+            r#"
+            hostname = "host.local"
+            port = 4252
+            "#,
+        )
+        .expect("parse legacy client");
+        assert_eq!(parsed.transport, None);
+        let cc: ConfigClient = parsed.into();
+        assert_eq!(cc.transport, TransportMode::Auto);
+    }
+
+    #[test]
+    fn transport_accepts_documented_spellings() {
+        for (text, expected) in [
+            ("auto", TransportMode::Auto),
+            ("udp", TransportMode::Udp),
+            ("tcp", TransportMode::Tcp),
+        ] {
+            let parsed: TomlClient = toml::from_str(&format!(
+                "hostname = \"host.local\"\ntransport = \"{text}\"\n"
+            ))
+            .expect("parse transport");
+            assert_eq!(parsed.transport, Some(expected));
+        }
     }
 
     #[test]

@@ -290,6 +290,55 @@ impl FromStr for ConnectMode {
     }
 }
 
+/// Preferred transport for the input session toward a peer.
+///
+/// `Auto` (default) keeps the historical UDP+DTLS path and only falls
+/// back to TLS over TCP when UDP is a pure transport failure (no
+/// response / connection refused within the dial budget). A peer that
+/// reached the DTLS layer and refused us — wrong certificate, failed
+/// access password — is *reachable*, so Auto never retries it over TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportMode {
+    /// UDP+DTLS first, TLS over TCP as the fallback.
+    #[default]
+    Auto,
+    /// UDP+DTLS only — the historical behavior, no fallback.
+    Udp,
+    /// TLS over TCP only.
+    Tcp,
+}
+
+impl Display for TransportMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportMode::Auto => write!(f, "auto"),
+            TransportMode::Udp => write!(f, "udp"),
+            TransportMode::Tcp => write!(f, "tcp"),
+        }
+    }
+}
+
+/// Concrete transport an established session rides on. Reported in
+/// [`ClientState::transport`] for display/logging; never persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportKind {
+    /// DTLS over UDP — the lowest-latency path.
+    Udp,
+    /// TLS 1.3 over a TCP stream, framed with a length prefix.
+    Tcp,
+}
+
+impl Display for TransportKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportKind::Udp => write!(f, "udp"),
+            TransportKind::Tcp => write!(f, "tcp"),
+        }
+    }
+}
+
 /// Physical kind of the network interface an address lives on, as
 /// classified by the *advertising* peer (interface type is invisible
 /// from L3, so the peer publishes it via mDNS TXT). Used purely for a
@@ -363,6 +412,12 @@ pub struct ClientConfig {
     /// network motivation behind [`ConnectMode::Reverse`].
     #[serde(default)]
     pub connect_mode: ConnectMode,
+    /// Preferred transport for this peer. Defaults to
+    /// [`TransportMode::Auto`]: UDP+DTLS first, TLS over TCP only when
+    /// UDP cannot reach the peer at all. `Udp` restores the historical
+    /// behavior (no fallback); `Tcp` forces the framed TLS path.
+    #[serde(default)]
+    pub transport: TransportMode,
 }
 
 impl Default for ClientConfig {
@@ -380,6 +435,7 @@ impl Default for ClientConfig {
             require_crossing_modifier: false,
             crossing_modifier: CrossingModifier::default(),
             connect_mode: ConnectMode::default(),
+            transport: TransportMode::default(),
         }
     }
 }
@@ -561,6 +617,12 @@ pub struct ClientState {
     /// state inline. `None` until the first inbound connection.
     #[serde(default)]
     pub peer_fingerprint: Option<String>,
+    /// Transport of the session currently established for this client
+    /// (outbound dial or adopted inbound/reverse session). `None` while
+    /// disconnected. Runtime state only — never persisted; the
+    /// preference lives in [`ClientConfig::transport`].
+    #[serde(default)]
+    pub transport: Option<TransportKind>,
 }
 
 /// Receiver-side view of a remote host's input availability. `Locked` and
@@ -884,6 +946,50 @@ mod tests {
         })
         .expect("encode state");
         assert_eq!(encoded["incoming"], true);
+    }
+
+    #[test]
+    fn client_transport_is_forward_and_backward_compatible() {
+        // A legacy config (no `transport` key) decodes as Auto.
+        let legacy: ClientConfig = serde_json::from_str(
+            r#"{"hostname":null,"fix_ips":[],"port":4252,"pos":"left",
+                "cmd":null,"mode":"auto","network_locks":{},
+                "clipboard_send":false,"command_as_ctrl":false,
+                "require_crossing_modifier":false,"crossing_modifier":"control",
+                "connect_mode":"direct"}"#,
+        )
+        .expect("decode legacy config");
+        assert_eq!(legacy.transport, TransportMode::Auto);
+
+        // The config spelling is the documented `auto|udp|tcp`.
+        for (text, expected) in [
+            ("auto", TransportMode::Auto),
+            ("udp", TransportMode::Udp),
+            ("tcp", TransportMode::Tcp),
+        ] {
+            let decoded: TransportMode =
+                serde_json::from_str(&format!("\"{text}\"")).expect("decode transport mode");
+            assert_eq!(decoded, expected);
+            assert_eq!(
+                serde_json::to_string(&expected).unwrap(),
+                format!("\"{text}\"")
+            );
+        }
+
+        // Runtime transport state is omitted by older daemons.
+        let legacy_state = r#"{"active":false,"active_addr":null,"alive":true,
+            "dns_ips":[],"discovered_ips":[],"ips":[],"interfaces":{},
+            "active_lock":null,"latencies":{},"has_pressed_keys":false,
+            "resolving":false,"peer_commit":null,"peer_fingerprint":null}"#;
+        let state: ClientState =
+            serde_json::from_str(legacy_state).expect("decode state without transport");
+        assert_eq!(state.transport, None);
+        let encoded = serde_json::to_value(ClientState {
+            transport: Some(TransportKind::Tcp),
+            ..Default::default()
+        })
+        .expect("encode state");
+        assert_eq!(encoded["transport"], "tcp");
     }
 
     #[test]

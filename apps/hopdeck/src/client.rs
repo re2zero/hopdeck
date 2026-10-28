@@ -9,7 +9,7 @@ use slab::Slab;
 
 use hopdeck_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectMode, ConnectionMode, CrossingModifier,
-    IfaceKind, Position,
+    IfaceKind, Position, TransportKind, TransportMode,
 };
 
 use crate::config::ConfigClient;
@@ -50,6 +50,7 @@ impl ClientManager {
             command_as_ctrl: config_client.command_as_ctrl,
             require_crossing_modifier: config_client.require_crossing_modifier,
             crossing_modifier: config_client.crossing_modifier,
+            transport: config_client.transport,
         };
         let state = ClientState {
             active: config_client.active,
@@ -360,6 +361,33 @@ impl ClientManager {
             }
             _ => false,
         }
+    }
+
+    /// Record which transport the live session uses (`None` on
+    /// disconnect). Display state only; it never routes events.
+    /// Returns `true` when the value changed.
+    pub(crate) fn set_transport(
+        &self,
+        handle: ClientHandle,
+        transport: Option<TransportKind>,
+    ) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((_, s)) if s.transport != transport => {
+                s.transport = transport;
+                self.client_states_dirty.set(true);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The transport preference configured for this client.
+    pub(crate) fn transport_mode(&self, handle: ClientHandle) -> TransportMode {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .map(|(c, _)| c.transport)
+            .unwrap_or_default()
     }
 
     /// Whether any connect-side state mutated since the last poll,
@@ -745,6 +773,24 @@ mod tests {
         assert!(!cm.take_client_states_dirty());
     }
 
+    #[test]
+    fn transport_state_is_display_only_and_marks_dirty() {
+        let (cm, handle) = manager_with_ips(&[]);
+        assert_eq!(cm.transport_mode(handle), TransportMode::Auto);
+        assert_eq!(cm.get_state(handle).unwrap().1.transport, None);
+        assert!(cm.set_transport(handle, Some(TransportKind::Tcp)));
+        assert!(cm.take_client_states_dirty());
+        assert_eq!(
+            cm.get_state(handle).unwrap().1.transport,
+            Some(TransportKind::Tcp)
+        );
+        // Same-value writes stay clean.
+        assert!(!cm.set_transport(handle, Some(TransportKind::Tcp)));
+        assert!(!cm.take_client_states_dirty());
+        assert!(cm.set_transport(handle, None));
+        assert!(cm.take_client_states_dirty());
+    }
+
     fn ip(a: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, a))
     }
@@ -765,6 +811,7 @@ mod tests {
             command_as_ctrl: false,
             require_crossing_modifier: false,
             crossing_modifier: CrossingModifier::default(),
+            transport: TransportMode::Auto,
             tunnel_forwards: Vec::new(),
             tunnel_port: crate::tunnel::DEFAULT_TUNNEL_PORT,
         });

@@ -331,7 +331,10 @@ console's General settings.
 
 Authorized devices can be persisted using the configuration file (see [Configuration](#configuration)).
 
-If the device still can not be entered, make sure you have UDP port `4252` (or the one selected) opened up in your firewall.
+If the device still can not be entered, make sure you have **UDP and TCP port**
+`4252` (or the one selected) opened up in your firewall. The input session is
+DTLS over UDP; when a network drops UDP in one direction, hopdeck falls back to
+TLS over TCP on the same port. `hopdeck firewall` adds both rules at once.
 </details>
 
 <details>
@@ -427,7 +430,7 @@ To create this file you can copy the following example config:
 # configure release bind
 release_bind = [ "KeyA", "KeyS", "KeyD", "KeyF" ]
 
-# optional port (defaults to 4252)
+# optional port (defaults to 4252); UDP and TCP are both used
 port = 4252
 
 # optional access password for incoming sessions. When set, devices whose
@@ -469,6 +472,10 @@ command_as_ctrl = true
 # optional: cross this edge only while either Control key is held
 require_crossing_modifier = true
 crossing_modifier = "control"
+# optional transport preference: "auto" (default), "udp", or "tcp".
+# "auto" dials UDP first and only falls back to TLS over TCP when UDP
+# cannot reach the peer at all; "udp" disables the fallback entirely.
+transport = "auto"
 ```
 
 Where `left` can be either `left`, `right`, `top` or `bottom`.
@@ -609,7 +616,8 @@ activate_on_startup = true
 
 or with the CLI: `hopdeck cli set-connect-mode <id> reverse`. Peers behind a
 port forward / DNAT work with `direct` by pointing the client at the forwarded
-address — forward **UDP**, not just TCP (the transport is UDP+DTLS).
+address — forward **both UDP and TCP** on the session port. UDP+DTLS is the
+normal path; TCP carries the TLS fallback (see [Restricted networks](#restricted-networks)).
 
 Once the reverse session is up, the controller sends input over the
 connection the controlled machine dialed: mark the peer `reverse` on the
@@ -619,14 +627,43 @@ input — the controlled machine can receive input over it, but driving the
 controller's pointer back across the same tunnel requires a session dialed
 in the other direction (future work).
 
+### Restricted networks
+
+Some managed networks drop UDP in one direction while passing TCP. hopdeck
+detects that without configuration: with `transport = "auto"` (the default) it
+dials UDP first, and if no UDP handshake completes within about two seconds it
+retries the same peer over TLS 1.3 on TCP, using the same port, the same
+certificate, the same fingerprint authorization and the same access password.
+Once TCP worked, reconnects try TCP first (in memory only — a daemon restart
+re-probes UDP), so the fallback costs nothing after the first session.
+
+A peer that answers and *refuses* us (unknown fingerprint, wrong access
+password) is reachable: Auto does not retry it over TCP, so you never get two
+authorization prompts for one attempt.
+
+Per-client overrides in the config file:
+
+```toml
+[[clients]]
+hostname = "thorium"
+transport = "tcp"   # force the framed TLS path
+# transport = "udp" # disable the fallback, exactly the historical behavior
+```
+
+Both transports share the session port, so a firewall rule must allow **UDP
+and TCP**; `sudo hopdeck firewall` writes both. On networks where a domain
+controller proxies or redirects TCP, the TLS session stays end-to-end
+encrypted — the proxy only sees ciphertext.
+
 ### Reverse Tunnel Forwarding
 
 Beyond input, a machine on a one-way network can reach *network services*
 through the session peer: services bound to the peer's loopback, hosts only
 the peer can route to, and names only the peer can resolve. Connections ride
 a dedicated TCP channel (default port **4253/tcp** — add it to your firewall
-alongside 4252/udp) with mutual TLS reusing the session certificate, and are
-multiplexed per stream with credit-based flow control.
+alongside the session port's UDP and TCP rules) with mutual TLS reusing the
+session certificate, and are multiplexed per stream with credit-based flow
+control.
 
 The **reachable side** enables the exit with a `[tunnel]` section. The allow
 list is VPN-routing-rule shaped and default-deny: entries are an exact IP

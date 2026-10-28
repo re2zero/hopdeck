@@ -1,5 +1,5 @@
 use futures::{Stream, StreamExt};
-use hopdeck_ipc::IncomingPeerConfig;
+use hopdeck_ipc::{IncomingPeerConfig, TransportKind};
 use hopdeck_proto::{
     CAP_ACCESS_PASSWORD, MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, ProtoEvent,
     decode_clipboard_event, decode_display_layout_event, decode_fixed_event,
@@ -16,11 +16,13 @@ use std::{
     time::{Duration, Instant},
 };
 use thiserror::Error;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::MissedTickBehavior;
 use tokio::{
     sync::Mutex as AsyncMutex,
     task::{JoinHandle, spawn_local},
 };
+use tokio_rustls::TlsAcceptor;
 use webrtc_dtls::{
     config::{ClientAuthType::RequireAnyClientCert, Config, ExtendedMasterSecretType},
     conn::DTLSConn,
@@ -29,7 +31,7 @@ use webrtc_dtls::{
 };
 use webrtc_util::{Conn, Error, conn::Listener};
 
-use crate::{connect::handshake_allows_event, crypto};
+use crate::{connect::handshake_allows_event, crypto, tcp_transport, tunnel};
 
 /// Failed access-password attempts allowed per peer IP inside
 /// [`AUTH_FAILURE_WINDOW`] before challenges are refused outright.
@@ -65,15 +67,19 @@ impl AuthGate {
         self.password.read().expect("lock").is_some()
     }
 
+    /// True when this fingerprint is in the persistent authorization
+    /// table (regardless of whether password auth is on).
+    fn is_authorized(&self, fingerprint: &str) -> bool {
+        self.authorized_keys
+            .read()
+            .expect("lock")
+            .contains_key(fingerprint)
+    }
+
     /// True when this fingerprint must answer the challenge: password auth
     /// on, fingerprint not persistently authorized.
     fn needs_challenge(&self, fingerprint: &str) -> bool {
-        self.enabled()
-            && !self
-                .authorized_keys
-                .read()
-                .expect("lock")
-                .contains_key(fingerprint)
+        self.enabled() && !self.is_authorized(fingerprint)
     }
 
     fn password(&self) -> Option<String> {
@@ -117,6 +123,8 @@ pub enum ListenerCreationError {
     WebrtcUtil(#[from] webrtc_util::Error),
     #[error(transparent)]
     WebrtcDtls(#[from] webrtc_dtls::Error),
+    #[error(transparent)]
+    Tls(#[from] rustls::Error),
     #[error("no listener could be bound on any local address")]
     NoBoundListener,
 }
@@ -129,6 +137,12 @@ pub(crate) type ListenerSession = u64;
 struct AcceptedConnection {
     session: ListenerSession,
     conn: ArcConn,
+    /// Leaf certificate fingerprint captured at handshake time. Stored
+    /// with the connection so the transport-agnostic session code never
+    /// has to downcast into a DTLS handle again.
+    fingerprint: String,
+    /// Which transport carried this session (`Udp` DTLS or `Tcp` TLS).
+    transport: TransportKind,
 }
 
 #[derive(Clone, Default)]
@@ -171,6 +185,9 @@ pub(crate) enum ListenEvent {
         addr: SocketAddr,
         session: ListenerSession,
         fingerprint: String,
+        /// Transport that carried the session, surfaced so the service
+        /// can label the live session (UDP DTLS vs TCP TLS).
+        transport: TransportKind,
     },
     Disconnected {
         addr: SocketAddr,
@@ -208,20 +225,72 @@ type VerifyPeerCertificateFn = Arc<
         + Sync,
 >;
 
-/// One bound DTLS listener and the task that accepts on it. Stored
-/// in a `HashMap<IpAddr, ListenerSlot>` keyed by the local IPv4
-/// address it's bound to so the supervisor can plug/unplug
-/// listeners as interfaces appear/disappear.
+/// One local IP's listeners and the tasks that accept on them. Both
+/// protocols share the same port (UDP DTLS and TCP TLS can coexist), so
+/// a slot carries one accept task per transport; either may be absent
+/// when its bind failed (TCP is best-effort and must never take UDP
+/// down with it).
 struct ListenerSlot {
-    /// Background task that calls `listener.accept()` in a loop and
-    /// forwards events into the shared `listen_tx` / `conns`.
-    /// Aborted on `Drop` so dropping the supervisor cleans up.
-    accept_task: JoinHandle<()>,
+    /// Background task that calls the DTLS listener's `accept()` in a
+    /// loop and forwards events into the shared `listen_tx` / `conns`.
+    udp_accept_task: Option<JoinHandle<()>>,
+    /// Background task that accepts TCP connections and spawns a TLS
+    /// handshake per connection. `None` when the TCP bind failed.
+    tcp_accept_task: Option<JoinHandle<()>>,
+}
+
+impl ListenerSlot {
+    fn udp_bound(&self) -> bool {
+        self.udp_accept_task.is_some()
+    }
 }
 
 impl Drop for ListenerSlot {
     fn drop(&mut self) {
-        self.accept_task.abort();
+        // Abort on `Drop` so dropping the supervisor (or removing an IP)
+        // never leaves an accept loop running against a dead slot.
+        if let Some(task) = self.udp_accept_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.tcp_accept_task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Everything the accept paths share: the event channel, the accepted-
+/// connection table, the session counter, the rejected-fingerprint
+/// queue and the TLS acceptor for the TCP side.
+#[derive(Clone)]
+struct AcceptContext {
+    listen_tx: Sender<ListenEvent>,
+    conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
+    sessions: ListenerSessions,
+    connection_attempts: Arc<Mutex<VecDeque<String>>>,
+    auth_gate: AuthGate,
+    tls: TlsAcceptor,
+}
+
+impl AcceptContext {
+    /// Register a freshly handshaked connection under its peer address.
+    async fn register(
+        &self,
+        addr: SocketAddr,
+        conn: &ArcConn,
+        fingerprint: String,
+        transport: TransportKind,
+    ) {
+        register_accepted_conn(
+            &self.listen_tx,
+            &self.conns,
+            &self.sessions,
+            addr,
+            conn,
+            &self.auth_gate,
+            fingerprint,
+            transport,
+        )
+        .await;
     }
 }
 
@@ -293,6 +362,18 @@ impl HopDeckListener {
         let conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>> =
             Rc::new(AsyncMutex::new(HashMap::new()));
         let sessions = ListenerSessions::default();
+        // TLS 1.3 over TCP, same certificate and same post-handshake
+        // fingerprint authorization as the DTLS side (chain validation is
+        // impossible for a self-signed cert; identity is the pinned leaf).
+        let tls = TlsAcceptor::from(Arc::new(tunnel::tls::server_config(&cert)?));
+        let accept_ctx = AcceptContext {
+            listen_tx: listen_tx.clone(),
+            conns: conns.clone(),
+            sessions: sessions.clone(),
+            connection_attempts: connection_attempts.clone(),
+            auth_gate: auth_gate.clone(),
+            tls,
+        };
 
         // Bind one listener per local address (v4 + v6, skipping
         // loopback / link-local / multicast) instead of a single
@@ -312,44 +393,30 @@ impl HopDeckListener {
         let mut listeners: HashMap<IpAddr, ListenerSlot> = HashMap::new();
         let mut bound_count = 0usize;
         for ip in &initial_addrs {
-            match try_bind_listener(*ip, port, &cfg).await {
-                Ok(listener) => {
-                    let task = spawn_accept_task(
-                        listener,
-                        listen_tx.clone(),
-                        conns.clone(),
-                        sessions.clone(),
-                        connection_attempts.clone(),
-                        auth_gate.clone(),
-                    );
-                    listeners.insert(*ip, ListenerSlot { accept_task: task });
-                    bound_count += 1;
-                    log::info!("listening for DTLS on {ip}:{port}");
-                }
-                Err(e) => log::warn!("failed to bind listener on {ip}:{port}: {e}"),
+            let slot = bind_ip(*ip, port, &cfg, &accept_ctx).await;
+            if slot.udp_bound() {
+                bound_count += 1;
             }
+            listeners.insert(*ip, slot);
         }
         if bound_count == 0 {
             // Either enumeration returned no addrs, or every bind
             // failed. Try `0.0.0.0:port` as a last resort.
             let fallback = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
-            match try_bind_listener(fallback, port, &cfg).await {
-                Ok(listener) => {
-                    let task = spawn_accept_task(
-                        listener,
-                        listen_tx.clone(),
-                        conns.clone(),
-                        sessions.clone(),
-                        connection_attempts.clone(),
-                        auth_gate.clone(),
-                    );
-                    listeners.insert(fallback, ListenerSlot { accept_task: task });
-                    log::info!(
-                        "listening for DTLS on {fallback}:{port} (fallback — symmetric replies not guaranteed)"
-                    );
-                }
-                Err(e) => return Err(e),
+            let slot = bind_ip(fallback, port, &cfg, &accept_ctx).await;
+            if !slot.udp_bound() {
+                // Re-run just the DTLS bind so the caller gets the actual
+                // cause (port in use, missing permission, …) instead of a
+                // generic "no listener" message.
+                return match try_bind_listener(fallback, port, &cfg).await {
+                    Ok(_) => Err(ListenerCreationError::NoBoundListener),
+                    Err(e) => Err(e),
+                };
             }
+            listeners.insert(fallback, slot);
+            log::warn!(
+                "listening on {fallback}:{port} (fallback — symmetric replies not guaranteed)"
+            );
         }
 
         // macOS wake → force-close-all-conns plumbing. On non-macOS
@@ -368,11 +435,7 @@ impl HopDeckListener {
             port,
             cfg,
             listeners,
-            listen_tx.clone(),
-            conns.clone(),
-            sessions.clone(),
-            connection_attempts,
-            auth_gate.clone(),
+            accept_ctx,
             request_port_change_rx,
             port_changed_tx,
             wake_rx,
@@ -404,15 +467,23 @@ impl HopDeckListener {
         self.sessions.current.borrow().get(&addr).copied()
     }
 
-    /// Register an outbound-dialed DTLS transport (reverse-connect) as
+    /// Register an outbound-dialed transport (reverse-connect) as
     /// if it had been accepted inbound: from here the listener's read
     /// loop, heartbeat and reply path own it exactly like an accept.
     /// Used by the controlled side of a reverse-mode client, whose
     /// dialed connection must serve the *injection* role even though
     /// it was established by dialing. The peer still has to complete
     /// the protocol `Hello` handshake like any inbound session.
-    pub(crate) async fn adopt(&self, peer_addr: SocketAddr, conn: ArcConn) {
-        log::info!("adopting reverse-dialed DTLS connection to {peer_addr} as inbound session");
+    pub(crate) async fn adopt(
+        &self,
+        peer_addr: SocketAddr,
+        conn: ArcConn,
+        fingerprint: String,
+        transport: TransportKind,
+    ) {
+        log::info!(
+            "adopting reverse-dialed {transport} connection to {peer_addr} as inbound session"
+        );
         register_accepted_conn(
             &self.listen_tx,
             &self.conns,
@@ -420,6 +491,8 @@ impl HopDeckListener {
             peer_addr,
             &conn,
             &self.auth_gate,
+            fingerprint,
+            transport,
         )
         .await;
     }
@@ -507,22 +580,14 @@ impl HopDeckListener {
         addr: SocketAddr,
         session: ListenerSession,
     ) -> Option<String> {
-        let conn = self
-            .conns
+        // Recorded once at registration, on both transports, so this is a
+        // plain table lookup — no transport downcast.
+        self.conns
             .lock()
             .await
             .get(&addr)
             .filter(|slot| slot.session == session)
-            .map(|slot| slot.conn.clone());
-        if let Some(conn) = conn {
-            let conn: &DTLSConn = conn.as_any().downcast_ref().expect("dtls conn");
-            let certs = conn.connection_state().await.peer_certificates;
-            let cert = certs.first()?;
-            let fingerprint = crypto::generate_fingerprint(cert);
-            Some(fingerprint)
-        } else {
-            None
-        }
+            .map(|slot| slot.fingerprint.clone())
     }
 }
 
@@ -540,7 +605,7 @@ impl Stream for HopDeckListener {
                     if current {
                         return std::task::Poll::Ready(Some(event));
                     }
-                    log::debug!("dropping queued event from a replaced inbound DTLS session");
+                    log::debug!("dropping queued event from a replaced inbound session");
                 }
                 other => return other,
             }
@@ -614,22 +679,50 @@ async fn try_bind_listener(
     Ok(Box::new(listener))
 }
 
-/// Spawn an accept loop for one bound listener. Each accepted
-/// `(conn, addr)` is registered in the shared `conns` vec and an
+/// Bind both transports on one local address. UDP+DTLS is the primary
+/// path and is required (the caller counts successful UDP binds); TCP is
+/// best-effort — a port collision or missing permission must never take
+/// the UDP listener down with it, because `transport = udp` peers depend
+/// on UDP alone.
+async fn bind_ip(ip: IpAddr, port: u16, cfg: &Config, ctx: &AcceptContext) -> ListenerSlot {
+    let addr = SocketAddr::new(ip, port);
+    let udp_accept_task = match try_bind_listener(ip, port, cfg).await {
+        Ok(listener) => {
+            log::info!("listening for DTLS on {ip}:{port}");
+            Some(spawn_accept_task(listener, ctx.clone()))
+        }
+        Err(e) => {
+            log::warn!("failed to bind DTLS listener on {ip}:{port}: {e}");
+            None
+        }
+    };
+    let tcp_accept_task = match TcpListener::bind(addr).await {
+        Ok(listener) => {
+            log::info!("listening for TLS over TCP on {ip}:{port}");
+            Some(spawn_tcp_accept_task(listener, ctx.clone()))
+        }
+        Err(e) => {
+            log::warn!(
+                "failed to bind TCP listener on {ip}:{port}: {e} — TCP fallback unavailable \
+                 on this address"
+            );
+            None
+        }
+    };
+    ListenerSlot {
+        udp_accept_task,
+        tcp_accept_task,
+    }
+}
+
+/// Spawn an accept loop for one bound DTLS listener. Each accepted
+/// `(conn, addr)` is registered in the shared `conns` map and an
 /// `Accept` event is published (withheld while the access-password
 /// challenge is pending). Verify-peer-certificate failures are
 /// re-published as `Rejected` so the UI can surface unauthorized
 /// fingerprints. The accept loop exits when the listener errors
 /// out or its task is aborted (interface went down, port changed).
-#[allow(clippy::too_many_arguments)]
-fn spawn_accept_task(
-    listener: DynListener,
-    listen_tx: Sender<ListenEvent>,
-    conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
-    sessions: ListenerSessions,
-    connection_attempts: Arc<Mutex<VecDeque<String>>>,
-    auth_gate: AuthGate,
-) -> JoinHandle<()> {
+fn spawn_accept_task(listener: DynListener, ctx: AcceptContext) -> JoinHandle<()> {
     spawn_local(async move {
         loop {
             // Do not wrap this in `select!`/`timeout`: webrtc-dtls runs the
@@ -640,7 +733,15 @@ fn spawn_accept_task(
             // dies silently.
             match listener.accept().await {
                 Ok((conn, addr)) => {
-                    register_accepted_conn(&listen_tx, &conns, &sessions, addr, &conn, &auth_gate)
+                    // The DTLS handle is concrete here, so this is the one
+                    // place the peer certificate is read on the UDP path; it
+                    // then travels with the connection as plain data.
+                    let Some(fingerprint) = dtls_peer_fingerprint(&conn).await else {
+                        log::warn!("DTLS peer {addr} presented no certificate — closing");
+                        let _ = conn.close().await;
+                        continue;
+                    };
+                    ctx.register(addr, &conn, fingerprint, TransportKind::Udp)
                         .await;
                 }
                 Err(e) => {
@@ -649,9 +750,9 @@ fn spawn_accept_task(
                             match de {
                                 webrtc_dtls::Error::ErrVerifyDataMismatch => {
                                     if let Some(fingerprint) =
-                                        connection_attempts.lock().expect("lock").pop_front()
+                                        ctx.connection_attempts.lock().expect("lock").pop_front()
                                     {
-                                        listen_tx
+                                        ctx.listen_tx
                                             .send(ListenEvent::Rejected { fingerprint })
                                             .expect("channel closed");
                                     }
@@ -670,13 +771,110 @@ fn spawn_accept_task(
     })
 }
 
-/// Shared registration path for a freshly handshaked inbound DTLS
-/// connection, used by both the listener accept loop and
-/// [`HopDeckListener::adopt`] (reverse-dialed transports). Allocates
-/// the session generation, replaces any prior connection from the
-/// same peer address, publishes `Accept` — unless the peer owes the
-/// access-password challenge, in which case the accept is withheld
-/// until `read_loop` verifies it — and starts the read loop.
+/// Leaf certificate fingerprint of an accepted DTLS connection.
+async fn dtls_peer_fingerprint(conn: &ArcConn) -> Option<String> {
+    let dtls: &DTLSConn = conn.as_any().downcast_ref()?;
+    let state = dtls.connection_state().await;
+    state
+        .peer_certificates
+        .first()
+        .map(|cert| crypto::generate_fingerprint(cert))
+}
+
+/// TLS handshake ceiling for one accepted TCP connection. Generous — the
+/// handshake happens on a dedicated task, so a stalled client costs
+/// nothing but its own resource.
+const TCP_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Spawn the accept loop for one bound TCP listener. Each connection gets
+/// its own task for the TLS handshake, so one slow or malicious client
+/// cannot stall the other accepts (the UDP accept loop is serialized by
+/// webrtc-dtls and deliberately *not* cancelled — see `spawn_accept_task`).
+fn spawn_tcp_accept_task(listener: TcpListener, ctx: AcceptContext) -> JoinHandle<()> {
+    spawn_local(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, addr)) => {
+                    spawn_local(accept_tcp_connection(stream, addr, ctx.clone()));
+                }
+                Err(e) => {
+                    // A transient accept error (EMFILE, …) must not spin the
+                    // loop; back off briefly. The task itself is aborted on
+                    // interface/port changes.
+                    log::warn!("TCP accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    })
+}
+
+/// Complete one inbound TCP session: TLS handshake, fingerprint check,
+/// then hand the transport to the shared registration path.
+///
+/// Authorization mirrors the DTLS semantics exactly:
+///   * authorized fingerprint → register (Accept published);
+///   * unauthorized with an access password configured → register with
+///     the `Accept` withheld so `read_loop` can run the challenge;
+///   * unauthorized without one → publish `Rejected` (the
+///     `ConnectionAttempt` the UI shows) and close without registering.
+async fn accept_tcp_connection(stream: TcpStream, addr: SocketAddr, ctx: AcceptContext) {
+    if let Err(e) = stream.set_nodelay(true) {
+        log::debug!("{addr}: TCP_NODELAY failed: {e}");
+    }
+    let stream = match tokio::time::timeout(TCP_TLS_HANDSHAKE_TIMEOUT, ctx.tls.accept(stream)).await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(e)) => {
+            log::debug!("TCP TLS handshake from {addr} failed: {e}");
+            return;
+        }
+        Err(_) => {
+            log::warn!("TCP TLS handshake from {addr} timed out — closing");
+            return;
+        }
+    };
+    let Some(fingerprint) = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(tunnel::tls::peer_fingerprint)
+    else {
+        log::warn!("TCP peer {addr} presented no certificate — closing");
+        return;
+    };
+    if !ctx.auth_gate.is_authorized(&fingerprint) && !ctx.auth_gate.enabled() {
+        log::info!("refusing unauthorized TCP peer {addr} ({fingerprint})");
+        ctx.listen_tx
+            .send(ListenEvent::Rejected { fingerprint })
+            .expect("channel closed");
+        // Dropping the stream closes the connection without ever
+        // entering the protocol layer.
+        return;
+    }
+    let conn: ArcConn = match tcp_transport::server_conn(stream) {
+        Ok(conn) => tcp_transport::into_conn(conn),
+        Err(e) => {
+            log::warn!("TCP peer {addr}: could not read socket addresses: {e}");
+            return;
+        }
+    };
+    ctx.register(addr, &conn, fingerprint, TransportKind::Tcp)
+        .await;
+}
+
+/// Shared registration path for a freshly handshaked inbound
+/// connection, on either transport. Used by the DTLS accept loop, the
+/// TCP accept task and [`HopDeckListener::adopt`] (reverse-dialed
+/// transports). Allocates the session generation, replaces any prior
+/// connection from the same peer address, publishes `Accept` — unless
+/// the peer owes the access-password challenge, in which case the accept
+/// is withheld until `read_loop` verifies it — and starts the read loop.
+///
+/// `fingerprint` and `transport` are passed in rather than recovered from
+/// the connection: the DTLS handle is not the only transport anymore, and
+/// downcasting would panic on a TCP session.
+#[allow(clippy::too_many_arguments)]
 async fn register_accepted_conn(
     listen_tx: &Sender<ListenEvent>,
     conns: &Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
@@ -684,8 +882,10 @@ async fn register_accepted_conn(
     addr: SocketAddr,
     conn: &ArcConn,
     auth_gate: &AuthGate,
+    fingerprint: String,
+    transport: TransportKind,
 ) {
-    log::info!("dtls client connected, ip: {addr}");
+    log::info!("{transport} client connected, ip: {addr}");
     let session = sessions.allocate(addr);
     let replaced = {
         let mut conns_guard = conns.lock().await;
@@ -694,20 +894,19 @@ async fn register_accepted_conn(
             AcceptedConnection {
                 session,
                 conn: conn.clone(),
+                fingerprint: fingerprint.clone(),
+                transport,
             },
         )
     };
     if let Some(replaced) = replaced {
         log::info!(
-            "replacing prior DTLS session {} for reused peer address {addr}",
+            "replacing prior {} session {} for reused peer address {addr}",
+            replaced.transport,
             replaced.session
         );
         let _ = replaced.conn.close().await;
     }
-    let dtls_conn: &DTLSConn = conn.as_any().downcast_ref().expect("dtls conn");
-    let certs = dtls_conn.connection_state().await.peer_certificates;
-    let cert = certs.first().expect("cert");
-    let fingerprint = crypto::generate_fingerprint(cert);
     if auth_gate.needs_challenge(&fingerprint) {
         log::info!(
             "withholding session for {addr} (unauthorized peer {fingerprint}) \
@@ -719,6 +918,7 @@ async fn register_accepted_conn(
                 addr,
                 session,
                 fingerprint: fingerprint.clone(),
+                transport,
             })
             .expect("channel closed");
     }
@@ -730,6 +930,7 @@ async fn register_accepted_conn(
         conn.clone(),
         listen_tx.clone(),
         fingerprint,
+        transport,
         auth_gate.clone(),
     ));
 }
@@ -737,18 +938,13 @@ async fn register_accepted_conn(
 /// Supervisor task: owns the set of active listeners, watches for
 /// interface up/down events via `if_watch`, and rebuilds listeners
 /// on port change. Each listener slot is keyed by its local IPv4
-/// address; on `IfEvent::Up` we add a slot, on `IfEvent::Down` we
-/// drop one (which aborts its accept task).
-#[allow(clippy::too_many_arguments)]
+/// address and holds both transports; on `IfEvent::Up` we add a slot,
+/// on `IfEvent::Down` we drop one (which aborts its accept tasks).
 fn spawn_supervisor_task(
     initial_port: u16,
     cfg: Config,
     initial_listeners: HashMap<IpAddr, ListenerSlot>,
-    listen_tx: Sender<ListenEvent>,
-    conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
-    sessions: ListenerSessions,
-    connection_attempts: Arc<Mutex<VecDeque<String>>>,
-    auth_gate: AuthGate,
+    ctx: AcceptContext,
     mut request_port_change_rx: Receiver<u16>,
     port_changed_tx: Sender<Result<u16, ListenerCreationError>>,
     mut wake_rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
@@ -756,6 +952,9 @@ fn spawn_supervisor_task(
     spawn_local(async move {
         let mut port = initial_port;
         let mut listeners = initial_listeners;
+        // The accept paths need the shared connection table for the
+        // post-wake force-close; everything else lives in `ctx`.
+        let conns = ctx.conns.clone();
         let mut watcher = match if_watch::tokio::IfWatcher::new() {
             Ok(w) => Some(w),
             Err(e) => {
@@ -800,35 +999,22 @@ fn spawn_supervisor_task(
                              (IP no longer present on any interface)"
                         );
                     }
-                    // `try_bind_listener` is async and may fail, so
-                    // `entry().or_insert_with(...)` doesn't fit — we
-                    // only want to insert on bind success. Match the
-                    // `Entry::Vacant` slot up front so the same hash
-                    // lookup covers both the existence check and the
-                    // later insert, satisfying clippy::map_entry.
+                    // `bind_ip` is async, so `entry().or_insert_with(...)`
+                    // doesn't fit — we only want to insert on UDP bind
+                    // success. Match the `Entry::Vacant` slot up front so
+                    // the same hash lookup covers both the existence check
+                    // and the later insert, satisfying clippy::map_entry.
                     for ip in current_ips {
                         if let std::collections::hash_map::Entry::Vacant(slot) =
                             listeners.entry(ip)
                         {
-                            match try_bind_listener(ip, port, &cfg).await {
-                                Ok(l) => {
-                                    let task = spawn_accept_task(
-                                        l,
-                                        listen_tx.clone(),
-                                        conns.clone(),
-                                        sessions.clone(),
-                                        connection_attempts.clone(),
-                                        auth_gate.clone(),
-                                    );
-                                    slot.insert(ListenerSlot { accept_task: task });
-                                    log::info!(
-                                        "reconcile: now listening on {ip}:{port} \
-                                         (IP appeared without an Up event)"
-                                    );
-                                }
-                                Err(e) => log::warn!(
-                                    "reconcile: failed to bind on {ip}:{port}: {e}"
-                                ),
+                            let bound = bind_ip(ip, port, &cfg, &ctx).await;
+                            if bound.udp_bound() {
+                                slot.insert(bound);
+                                log::info!(
+                                    "reconcile: now listening on {ip}:{port} \
+                                     (IP appeared without an Up event)"
+                                );
                             }
                         }
                     }
@@ -842,20 +1028,10 @@ fn spawn_supervisor_task(
                     Ok(if_watch::IfEvent::Up(net)) => {
                         let ip = net.addr();
                         if is_listenable_addr(ip) && !listeners.contains_key(&ip) {
-                            match try_bind_listener(ip, port, &cfg).await {
-                                Ok(l) => {
-                                    let task = spawn_accept_task(
-                                        l,
-                                        listen_tx.clone(),
-                                        conns.clone(),
-                                        sessions.clone(),
-                                        connection_attempts.clone(),
-                                        auth_gate.clone(),
-                                    );
-                                    listeners.insert(ip, ListenerSlot { accept_task: task });
-                                    log::info!("interface up: now listening on {ip}:{port}");
-                                }
-                                Err(e) => log::warn!("failed to bind on {ip}:{port}: {e}"),
+                            let bound = bind_ip(ip, port, &cfg, &ctx).await;
+                            if bound.udp_bound() {
+                                listeners.insert(ip, bound);
+                                log::info!("interface up: now listening on {ip}:{port}");
                             }
                         }
                     }
@@ -877,7 +1053,7 @@ fn spawn_supervisor_task(
                     // treat that as observer-gone, ignore further
                     // wakes by stripping the receiver. `Some(())` is
                     // the post-wake signal — force-close every
-                    // accepted DTLS slot. Each `read_loop`'s `recv`
+                    // accepted session. Each `read_loop`'s `recv`
                     // errors out and the existing exit path removes
                     // the slot, so a peer reconnect lands on a clean
                     // accept instead of stacking on top of a stale
@@ -910,21 +1086,11 @@ fn spawn_supervisor_task(
                     let mut bound = 0usize;
                     let addrs = enumerate_listenable_addrs();
                     for ip in &addrs {
-                        match try_bind_listener(*ip, new_port, &cfg).await {
-                            Ok(l) => {
-                                let task = spawn_accept_task(
-                                    l,
-                                    listen_tx.clone(),
-                                    conns.clone(),
-                                    sessions.clone(),
-                                    connection_attempts.clone(),
-                                    auth_gate.clone(),
-                                );
-                                listeners.insert(*ip, ListenerSlot { accept_task: task });
-                                bound += 1;
-                            }
-                            Err(e) => log::warn!("port change: failed to bind {ip}:{new_port}: {e}"),
+                        let slot = bind_ip(*ip, new_port, &cfg, &ctx).await;
+                        if slot.udp_bound() {
+                            bound += 1;
                         }
+                        listeners.insert(*ip, slot);
                     }
                     if bound == 0 {
                         port_changed_tx
@@ -942,8 +1108,8 @@ fn spawn_supervisor_task(
     })
 }
 
-/// Max silence on an accepted DTLS session before it's torn down.
-/// DTLS rides UDP, which carries no FIN — a peer that goes silent
+/// Max silence on an accepted session before it's torn down.
+/// UDP/DTLS carries no FIN — a peer that goes silent
 /// (asleep, network-partitioned, daemon killed) leaves an otherwise-
 /// blocked `recv` waiting forever, and the slot in `conns` becomes
 /// a zombie that nothing else evicts. The connector side sends a
@@ -962,8 +1128,9 @@ async fn read_loop(
     addr: SocketAddr,
     session: ListenerSession,
     conn: ArcConn,
-    dtls_tx: Sender<ListenEvent>,
+    listen_tx: Sender<ListenEvent>,
     fingerprint: String,
+    transport: TransportKind,
     auth_gate: AuthGate,
 ) -> Result<(), Error> {
     // Buffer sized for the largest legal variable-length frame; fixed
@@ -1022,7 +1189,7 @@ async fn read_loop(
             continue;
         }
         if !accepted_connection_is_current(&conns, addr, session).await {
-            log::debug!("ending replaced inbound DTLS read session {session} for {addr}");
+            log::debug!("ending replaced inbound {transport} read session {session} for {addr}");
             break;
         }
         let datagram = &b[..n];
@@ -1090,7 +1257,7 @@ async fn read_loop(
                     continue;
                 }
                 hello_ok.set(true);
-                dtls_tx
+                listen_tx
                     .send(ListenEvent::Msg {
                         event: ProtoEvent::Hello {
                             magic,
@@ -1121,11 +1288,12 @@ async fn read_loop(
                     // Publish the withheld Accept now — ahead of the peer's
                     // next Hello retransmission, which flows through the
                     // normal handshake path and completes the session.
-                    dtls_tx
+                    listen_tx
                         .send(ListenEvent::Accept {
                             addr,
                             session,
                             fingerprint: fingerprint.clone(),
+                            transport,
                         })
                         .expect("channel closed");
                 } else {
@@ -1145,7 +1313,7 @@ async fn read_loop(
                 // handshake gate into the forwarding path.
                 log::debug!("ignoring out-of-place auth event from {addr}");
             }
-            Some(event) => dtls_tx
+            Some(event) => listen_tx
                 .send(ListenEvent::Msg {
                     event,
                     addr,
@@ -1154,7 +1322,7 @@ async fn read_loop(
                 .expect("channel closed"),
             None => {
                 // Skip the malformed/unknown datagram and keep
-                // listening. Each DTLS recv returns one full
+                // listening. Each recv returns one full
                 // datagram, so a parse error here can't desync a
                 // stream; the next call gets a fresh, framed
                 // message. This makes the protocol forward-
@@ -1166,23 +1334,23 @@ async fn read_loop(
             }
         }
     }
-    log::info!("dtls client disconnected {addr:?}");
+    log::info!("{transport} client disconnected {addr:?}");
     let mut conns = conns.lock().await;
     // A peer can reconnect with the same UDP 4-tuple before the old
     // read loop observes its close. Remove this slot only if it still
     // belongs to our exact Arc; a stale loop must never evict the
     // replacement connection.
     if remove_connection_if_current(&mut conns, addr, session).is_none() {
-        log::debug!("ignoring stale disconnect for replaced DTLS client {addr:?}");
+        log::debug!("ignoring stale disconnect for replaced {transport} client {addr:?}");
     } else {
         sessions.remove_if_current(addr, session);
         drop(conns);
-        let _ = dtls_tx.send(ListenEvent::Disconnected { addr, session });
+        let _ = listen_tx.send(ListenEvent::Disconnected { addr, session });
     }
     Ok(())
 }
 
-/// Send one fixed-size protocol frame directly over an accepted DTLS
+/// Send one fixed-size protocol frame directly over an accepted
 /// transport. The normal reply path routes through the listener (which
 /// re-checks the session generation); the access-password exchange runs
 /// inside the connection's own read task, which already owns this exact
@@ -1264,7 +1432,7 @@ async fn hello_watchdog(
     }
 }
 
-/// Classify a DTLS datagram by its first-byte event-type tag and
+/// Classify an accepted-transport frame by its first-byte event-type tag and
 /// route through a variable-length codec or the fixed-buffer `try_into` path.
 /// Mirrors `decode_proto_datagram` on the connect side so both directions
 /// accept the same wire formats.
@@ -1283,10 +1451,182 @@ fn decode_listen_datagram(bytes: &[u8]) -> Option<ProtoEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::pki_types::ServerName;
     use tokio::net::UdpSocket;
+    use tokio_rustls::TlsConnector;
 
     async fn test_conn() -> ArcConn {
         Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("test socket"))
+    }
+
+    fn test_fingerprint() -> String {
+        "aa:bb:cc".to_owned()
+    }
+
+    fn accepted(session: ListenerSession, conn: ArcConn) -> AcceptedConnection {
+        AcceptedConnection {
+            session,
+            conn,
+            fingerprint: test_fingerprint(),
+            transport: TransportKind::Udp,
+        }
+    }
+
+    fn self_signed() -> Certificate {
+        Certificate::generate_self_signed(["hopdeck-listen-test".to_owned()]).expect("certificate")
+    }
+
+    /// An `AcceptContext` backed by a loopback listener's worth of state,
+    /// plus the event receiver to inspect what the accept path published.
+    fn tcp_context(
+        server_cert: &Certificate,
+        authorized: &[String],
+        password: Option<&str>,
+    ) -> (AcceptContext, Receiver<ListenEvent>) {
+        let (listen_tx, listen_rx) = channel();
+        let authorized_keys = authorized
+            .iter()
+            .map(|fp| (fp.clone(), IncomingPeerConfig::default()))
+            .collect();
+        let ctx = AcceptContext {
+            listen_tx,
+            conns: Rc::new(AsyncMutex::new(HashMap::new())),
+            sessions: ListenerSessions::default(),
+            connection_attempts: Default::default(),
+            auth_gate: AuthGate {
+                password: Arc::new(RwLock::new(password.map(str::to_owned))),
+                authorized_keys: Arc::new(RwLock::new(authorized_keys)),
+                failures: Default::default(),
+            },
+            tls: TlsAcceptor::from(Arc::new(
+                tunnel::tls::server_config(server_cert).expect("server TLS config"),
+            )),
+        };
+        (ctx, listen_rx)
+    }
+
+    /// Run one TLS client/server handshake against
+    /// `accept_tcp_connection`. Returns the peer address the server saw
+    /// and the client stream (kept alive by the caller so the session
+    /// does not close mid-assertion).
+    async fn run_tls_accept(
+        ctx: &AcceptContext,
+        client_cert: &Certificate,
+    ) -> (SocketAddr, tokio_rustls::client::TlsStream<TcpStream>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tcp listener");
+        let addr = listener.local_addr().expect("listener address");
+        let peer = Rc::new(Cell::new(None::<SocketAddr>));
+
+        let server = {
+            let ctx = ctx.clone();
+            let peer = peer.clone();
+            async move {
+                let (stream, peer_addr) = listener.accept().await.expect("accept tcp");
+                peer.set(Some(peer_addr));
+                accept_tcp_connection(stream, peer_addr, ctx).await;
+            }
+        };
+        let client = async move {
+            let config = tunnel::tls::client_config(client_cert).expect("client TLS config");
+            let connector = TlsConnector::from(Arc::new(config));
+            let sock = TcpStream::connect(addr).await.expect("tcp connect");
+            let name = ServerName::try_from("ignored").expect("server name");
+            connector.connect(name, sock).await.expect("tls connect")
+        };
+        let (_, stream) = tokio::join!(server, client);
+        (peer.get().expect("server saw the peer address"), stream)
+    }
+
+    #[tokio::test]
+    async fn authorized_tcp_peer_registers_with_fingerprint_and_transport() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server_cert = self_signed();
+                let client_cert = self_signed();
+                let fingerprint = crypto::certificate_fingerprint(&client_cert);
+                let (ctx, mut events) =
+                    tcp_context(&server_cert, std::slice::from_ref(&fingerprint), None);
+
+                let (peer_addr, _client) = run_tls_accept(&ctx, &client_cert).await;
+
+                match events.recv().await.expect("accept event") {
+                    ListenEvent::Accept {
+                        addr,
+                        session,
+                        fingerprint: got,
+                        transport,
+                    } => {
+                        assert_eq!(addr, peer_addr);
+                        assert_eq!(got, fingerprint);
+                        assert_eq!(transport, TransportKind::Tcp);
+                        // The registered slot carries the same identity, so
+                        // `get_certificate_fingerprint` needs no downcast.
+                        let conns = ctx.conns.lock().await;
+                        let slot = conns.get(&addr).expect("registered");
+                        assert_eq!(slot.session, session);
+                        assert_eq!(slot.fingerprint, fingerprint);
+                        assert_eq!(slot.transport, TransportKind::Tcp);
+                    }
+                    _ => panic!("expected an Accept event"),
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn unauthorized_tcp_peer_is_registered_but_accept_withheld_in_password_mode() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server_cert = self_signed();
+                let client_cert = self_signed();
+                let (ctx, mut events) = tcp_context(&server_cert, &[], Some("secret"));
+
+                let (peer_addr, _client) = run_tls_accept(&ctx, &client_cert).await;
+
+                // Registered so `read_loop` can run the access-password
+                // challenge, but no `Accept` is published yet.
+                let conns = ctx.conns.lock().await;
+                assert_eq!(conns.len(), 1);
+                assert!(conns.contains_key(&peer_addr));
+                drop(conns);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(200), events.recv())
+                        .await
+                        .is_err(),
+                    "accept must be withheld until the challenge passes"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn unauthorized_tcp_peer_without_password_is_rejected() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server_cert = self_signed();
+                let client_cert = self_signed();
+                let fingerprint = crypto::certificate_fingerprint(&client_cert);
+                let (ctx, mut events) = tcp_context(&server_cert, &[], None);
+
+                let (_peer_addr, _client) = run_tls_accept(&ctx, &client_cert).await;
+
+                match events.recv().await.expect("rejection event") {
+                    ListenEvent::Rejected { fingerprint: got } => {
+                        assert_eq!(got, fingerprint);
+                    }
+                    _ => panic!("expected a Rejected event"),
+                }
+                assert!(
+                    ctx.conns.lock().await.is_empty(),
+                    "an unauthorized peer must never enter the session table"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -1295,13 +1635,7 @@ mod tests {
         let replacement = test_conn().await;
         let old_session = 1;
         let replacement_session = 2;
-        let mut conns = HashMap::from([(
-            addr,
-            AcceptedConnection {
-                session: replacement_session,
-                conn: replacement.clone(),
-            },
-        )]);
+        let mut conns = HashMap::from([(addr, accepted(replacement_session, replacement.clone()))]);
 
         assert!(remove_connection_if_current(&mut conns, addr, old_session).is_none());
         assert!(Arc::ptr_eq(
@@ -1315,13 +1649,7 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:4242".parse().expect("test address");
         let current = test_conn().await;
         let session = 7;
-        let mut conns = HashMap::from([(
-            addr,
-            AcceptedConnection {
-                session,
-                conn: current.clone(),
-            },
-        )]);
+        let mut conns = HashMap::from([(addr, accepted(session, current.clone()))]);
 
         let removed = remove_connection_if_current(&mut conns, addr, session)
             .expect("current connection removed");
@@ -1338,14 +1666,9 @@ mod tests {
         let sessions = ListenerSessions::default();
         let stale = sessions.allocate(addr);
         let active = sessions.allocate(addr);
-        let conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>> =
-            Rc::new(AsyncMutex::new(HashMap::from([(
-                addr,
-                AcceptedConnection {
-                    session: active,
-                    conn: current.clone(),
-                },
-            )])));
+        let conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>> = Rc::new(
+            AsyncMutex::new(HashMap::from([(addr, accepted(active, current.clone()))])),
+        );
         let (listen_tx, listen_rx) = local_channel::mpsc::channel();
         let (request_port_change, _request_port_change_rx) = local_channel::mpsc::channel();
         let (_port_changed_tx, port_changed) = local_channel::mpsc::channel();

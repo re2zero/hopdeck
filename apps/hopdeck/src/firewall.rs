@@ -1,12 +1,14 @@
-//! `hopdeck firewall` — open the hopdeck UDP port in the host
+//! `hopdeck firewall` — open the hopdeck session ports in the host
 //! firewall.
 //!
-//! hopdeck's transport is DTLS over UDP on a single port. Many Linux
-//! distros ship a default-deny firewall (Ubuntu's `ufw`, Fedora's
-//! `firewalld`, or plain `nftables`), and Windows Firewall blocks
-//! inbound UDP by default — so an *inbound* connection from a peer is
-//! dropped even though outbound works. This subcommand detects the
-//! active firewall and adds (or removes) the matching allow rule.
+//! hopdeck's transport is DTLS over UDP on a single port, with TLS over
+//! TCP on the *same* port as the fallback for networks that drop UDP in
+//! one direction. Many Linux distros ship a default-deny firewall
+//! (Ubuntu's `ufw`, Fedora's `firewalld`, or plain `nftables`), and
+//! Windows Firewall blocks inbound traffic by default — so an *inbound*
+//! connection from a peer is dropped even though outbound works. This
+//! subcommand detects the active firewall and adds (or removes) the
+//! matching allow rules for both protocols.
 //!
 //! Adding rules requires elevation, so this is meant to be run as
 //! `sudo hopdeck firewall` (Linux) / from an elevated shell
@@ -36,7 +38,7 @@ pub fn run(port: u16, remove: bool, dry_run: bool) -> i32 {
         Some(p) => p,
         None => {
             eprintln!(
-                "hopdeck firewall: no supported firewall detected. Allow UDP port {port} \
+                "hopdeck firewall: no supported firewall detected. Allow UDP and TCP port {port} \
                  inbound manually if your host blocks it."
             );
             return 0;
@@ -44,7 +46,10 @@ pub fn run(port: u16, remove: bool, dry_run: bool) -> i32 {
     };
 
     let verb = if remove { "Removing" } else { "Adding" };
-    println!("{verb} a rule for UDP/{port} via {} ...", plan.backend);
+    println!(
+        "{verb} rules for UDP/{port} and TCP/{port} via {} ...",
+        plan.backend
+    );
 
     if dry_run || !plan.apply {
         if !plan.apply && !dry_run {
@@ -109,20 +114,31 @@ fn s(v: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn plan_for_host(port: u16, remove: bool) -> Option<Plan> {
+    // Both protocols share the port: UDP carries the DTLS session, TCP
+    // the TLS fallback used when a network drops UDP in one direction.
     let pu = format!("{port}/udp");
+    let pt = format!("{port}/tcp");
     // Prefer the higher-level managers (ufw, firewalld) — they own the
     // ruleset and have stable, idempotent CLIs — before touching
     // nft/iptables directly.
     if service_active("ufw") {
-        let cmd = if remove {
-            vec![s("ufw"), s("delete"), s("allow"), pu]
-        } else {
-            vec![s("ufw"), s("allow"), pu, s("comment"), s("hopdeck")]
+        let cmd = |proto: &str| {
+            if remove {
+                vec![s("ufw"), s("delete"), s("allow"), proto.to_string()]
+            } else {
+                vec![
+                    s("ufw"),
+                    s("allow"),
+                    proto.to_string(),
+                    s("comment"),
+                    s("hopdeck"),
+                ]
+            }
         };
         return Some(Plan {
             backend: "ufw",
             apply: true,
-            commands: vec![cmd],
+            commands: vec![cmd(&pu), cmd(&pt)],
             note: None,
         });
     }
@@ -136,11 +152,8 @@ fn plan_for_host(port: u16, remove: bool) -> Option<Plan> {
             backend: "firewalld",
             apply: true,
             commands: vec![
-                vec![
-                    s("firewall-cmd"),
-                    s("--permanent"),
-                    format!("{flag}={port}/udp"),
-                ],
+                vec![s("firewall-cmd"), s("--permanent"), format!("{flag}={pu}")],
+                vec![s("firewall-cmd"), s("--permanent"), format!("{flag}={pt}")],
                 vec![s("firewall-cmd"), s("--reload")],
             ],
             note: None,
@@ -149,21 +162,24 @@ fn plan_for_host(port: u16, remove: bool) -> Option<Plan> {
     if service_active("nftables") || command_exists("nft") {
         // Chain/table names are site-specific; print rather than guess.
         let verb = if remove { "delete" } else { "add" };
-        return Some(Plan {
-            backend: "nftables",
-            apply: false,
-            commands: vec![vec![
+        let rule = |proto: &str| {
+            vec![
                 s("nft"),
                 s(verb),
                 s("rule"),
                 s("inet"),
                 s("filter"),
                 s("input"),
-                s("udp"),
+                s(proto),
                 s("dport"),
                 port.to_string(),
                 s("accept"),
-            ]],
+            ]
+        };
+        return Some(Plan {
+            backend: "nftables",
+            apply: false,
+            commands: vec![rule("udp"), rule("tcp")],
             note: Some(s(
                 "  (substitute your actual table/chain — list them with `nft list ruleset`)",
             )),
@@ -171,32 +187,27 @@ fn plan_for_host(port: u16, remove: bool) -> Option<Plan> {
     }
     if command_exists("iptables") {
         let verb = if remove { "-D" } else { "-A" };
+        let rule = |tool: &str, proto: &str| {
+            vec![
+                s(tool),
+                s(verb),
+                s("INPUT"),
+                s("-p"),
+                s(proto),
+                s("--dport"),
+                port.to_string(),
+                s("-j"),
+                s("ACCEPT"),
+            ]
+        };
         return Some(Plan {
             backend: "iptables",
             apply: false,
             commands: vec![
-                vec![
-                    s("iptables"),
-                    s(verb),
-                    s("INPUT"),
-                    s("-p"),
-                    s("udp"),
-                    s("--dport"),
-                    port.to_string(),
-                    s("-j"),
-                    s("ACCEPT"),
-                ],
-                vec![
-                    s("ip6tables"),
-                    s(verb),
-                    s("INPUT"),
-                    s("-p"),
-                    s("udp"),
-                    s("--dport"),
-                    port.to_string(),
-                    s("-j"),
-                    s("ACCEPT"),
-                ],
+                rule("iptables", "udp"),
+                rule("iptables", "tcp"),
+                rule("ip6tables", "udp"),
+                rule("ip6tables", "tcp"),
             ],
             note: Some(s(
                 "  (and persist them with your distro's iptables-save mechanism)",
@@ -208,34 +219,36 @@ fn plan_for_host(port: u16, remove: bool) -> Option<Plan> {
 
 #[cfg(target_os = "windows")]
 fn plan_for_host(port: u16, remove: bool) -> Option<Plan> {
-    let name = format!("HopDeck (UDP {port})");
-    let commands = if remove {
-        vec![vec![
-            s("netsh"),
-            s("advfirewall"),
-            s("firewall"),
-            s("delete"),
-            s("rule"),
-            format!("name={name}"),
-        ]]
-    } else {
-        vec![vec![
-            s("netsh"),
-            s("advfirewall"),
-            s("firewall"),
-            s("add"),
-            s("rule"),
-            format!("name={name}"),
-            s("dir=in"),
-            s("action=allow"),
-            s("protocol=UDP"),
-            format!("localport={port}"),
-        ]]
+    let rule = |protocol: &str| {
+        let name = format!("HopDeck ({protocol} {port})");
+        if remove {
+            vec![
+                s("netsh"),
+                s("advfirewall"),
+                s("firewall"),
+                s("delete"),
+                s("rule"),
+                format!("name={name}"),
+            ]
+        } else {
+            vec![
+                s("netsh"),
+                s("advfirewall"),
+                s("firewall"),
+                s("add"),
+                s("rule"),
+                format!("name={name}"),
+                s("dir=in"),
+                s("action=allow"),
+                format!("protocol={protocol}"),
+                format!("localport={port}"),
+            ]
+        }
     };
     Some(Plan {
         backend: "Windows Firewall",
         apply: true,
-        commands,
+        commands: vec![rule("UDP"), rule("TCP")],
         note: Some(s("  (run from an Administrator command prompt)")),
     })
 }
@@ -249,7 +262,7 @@ fn plan_for_host(port: u16, _remove: bool) -> Option<Plan> {
         note: Some(format!(
             "  macOS's application firewall is per-app and off by default; a signed\n  \
              HopDeck.app needs no port rule. If you've enabled it, allow the app under\n  \
-             System Settings > Network > Firewall. (UDP port {port}.)"
+             System Settings > Network > Firewall. (UDP and TCP port {port}.)"
         )),
     })
 }

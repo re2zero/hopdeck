@@ -3,7 +3,11 @@ use crate::config::local_commit;
 use crate::crypto;
 use crate::discovery::{PrimaryCache, normalize_mdns_name};
 use crate::emulation::EmulationRequest;
-use hopdeck_ipc::{ClientHandle, ConnectMode, ConnectionMode, DEFAULT_PORT};
+use crate::tcp_transport;
+use crate::tunnel;
+use hopdeck_ipc::{
+    ClientHandle, ConnectMode, ConnectionMode, DEFAULT_PORT, TransportKind, TransportMode,
+};
 use hopdeck_proto::{
     MAX_CLIPBOARD_SIZE, MAX_EVENT_SIZE, PROTOCOL_MAGIC, ProtoEvent, decode_clipboard_event,
     decode_display_layout_event, decode_fixed_event, encode_clipboard_event,
@@ -11,6 +15,7 @@ use hopdeck_proto::{
 };
 use input_event::{Event as InputEvent, KeyboardEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
+use rustls::pki_types::ServerName;
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -23,10 +28,11 @@ use std::{
 };
 use thiserror::Error;
 use tokio::{
-    net::UdpSocket,
+    net::{TcpStream, UdpSocket},
     sync::Mutex,
     task::{JoinSet, spawn_local},
 };
+use tokio_rustls::TlsConnector;
 use webrtc_dtls::{
     config::{Config, ExtendedMasterSecretType},
     conn::DTLSConn,
@@ -86,12 +92,72 @@ pub(crate) enum HopDeckConnectionError {
     Dtls(#[from] webrtc_dtls::Error),
     #[error(transparent)]
     Webrtc(#[from] webrtc_util::Error),
+    #[error(transparent)]
+    Tls(#[from] rustls::Error),
+    #[error("tcp: {0}")]
+    Tcp(io::Error),
     #[error("not connected")]
     NotConnected,
     #[error("emulation is disabled on the target device")]
     TargetEmulationDisabled,
     #[error("Connection timed out")]
     Timeout,
+}
+
+impl HopDeckConnectionError {
+    /// Whether this failure tells us *nothing* about the peer: no answer
+    /// arrived on this transport. Only such a failure justifies trying the
+    /// other transport — a peer that reached its security layer and refused
+    /// us (bad fingerprint, failed access password, foreign service on the
+    /// port) is reachable and would refuse the fallback in exactly the same
+    /// way, so falling back would only duplicate the authorization prompt.
+    fn is_transport_failure(&self) -> bool {
+        match self {
+            HopDeckConnectionError::Timeout | HopDeckConnectionError::NotConnected => true,
+            HopDeckConnectionError::Bind(e) | HopDeckConnectionError::Tcp(e) => {
+                is_unreachable_io(e)
+            }
+            HopDeckConnectionError::Webrtc(webrtc_util::Error::Io(e)) => is_unreachable_io(&e.0),
+            HopDeckConnectionError::Dtls(e) => is_unreachable_dtls(e),
+            HopDeckConnectionError::Tls(_) | HopDeckConnectionError::TargetEmulationDisabled => {
+                false
+            }
+            // Any other webrtc-util error means the local stack gave up
+            // mid-handshake with the peer involved; not a pure transport
+            // miss.
+            HopDeckConnectionError::Webrtc(_) => false,
+        }
+    }
+}
+
+fn is_unreachable_io(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::AddrNotAvailable
+    )
+}
+
+/// DTLS failures that mean "nothing answered on this socket" rather than
+/// "the peer answered and refused". `ErrAlertFatalOrClose` and the
+/// certificate/verify errors are deliberately *not* listed: those are the
+/// authentication refusals that must not trigger a transport fallback.
+fn is_unreachable_dtls(e: &webrtc_dtls::Error) -> bool {
+    match e {
+        webrtc_dtls::Error::ErrDeadlineExceeded
+        | webrtc_dtls::Error::ErrConnClosed
+        | webrtc_dtls::Error::ErrContextCanceled
+        | webrtc_dtls::Error::ErrHandshakeInProgress => true,
+        webrtc_dtls::Error::Io(e) => is_unreachable_io(&e.0),
+        webrtc_dtls::Error::Util(webrtc_util::Error::Io(e)) => is_unreachable_io(&e.0),
+        _ => false,
+    }
 }
 
 /// Events delivered from the outbound connection tasks to the capture loop.
@@ -227,11 +293,34 @@ fn record_retry_failure(
     entry.backoff = (next * 2).min(MAX_RETRY_BACKOFF);
 }
 
+/// A successful dial: the transport the session runs on plus the identity
+/// facts that used to be recovered by downcasting the DTLS connection.
+struct Dialed {
+    conn: ArcConn,
+    addr: SocketAddr,
+    transport: TransportKind,
+    /// Leaf certificate fingerprint of the peer, taken right after the
+    /// handshake on either transport.
+    peer_fingerprint: Option<String>,
+}
+
+/// How long a TCP connect plus the TLS handshake on top of it may take.
+/// Same budget as the DTLS handshake; a LAN round-trip is orders of
+/// magnitude shorter.
+const TCP_CONNECT_TIMEOUT: Duration = DEFAULT_CONNECTION_TIMEOUT;
+
+/// How long `TransportMode::Auto` waits for *any* UDP candidate to
+/// handshake before it also tries TCP. UDP stays the preferred path: when
+/// it works it wins well within this budget, and when the network drops
+/// UDP one-way this bounds the extra latency before the fallback dial
+/// starts.
+const AUTO_UDP_TIMEOUT: Duration = Duration::from_secs(2);
+
 async fn connect(
     addr: SocketAddr,
     cert: Certificate,
-) -> Result<(Arc<dyn Conn + Sync + Send>, SocketAddr), (SocketAddr, HopDeckConnectionError)> {
-    log::info!("connecting to {addr} ...");
+) -> Result<Dialed, (SocketAddr, HopDeckConnectionError)> {
+    log::info!("connecting to {addr} over udp ...");
     // Bind family must match the target's: a 0.0.0.0 socket fails
     // `connect()` to a v6 peer with EAFNOSUPPORT, and vice versa.
     // On a v4-only kernel the `[::]:0` bind itself errors out and
@@ -257,10 +346,72 @@ async fn connect(
     tokio::select! {
         _ = timeout => Err((addr, HopDeckConnectionError::Timeout)),
         result = DTLSConn::new(conn, config, true, None) => match result {
-            Ok(dtls_conn) => Ok((Arc::new(dtls_conn), addr)),
+            Ok(dtls_conn) => {
+                let peer_fingerprint = dtls_peer_fingerprint(&dtls_conn).await;
+                Ok(Dialed {
+                    conn: Arc::new(dtls_conn),
+                    addr,
+                    transport: TransportKind::Udp,
+                    peer_fingerprint,
+                })
+            }
             Err(e) => Err((addr, e.into())),
         }
     }
+}
+
+/// Leaf certificate fingerprint presented by a DTLS peer. Read while the
+/// connection is still concrete — the session layer no longer downcasts.
+async fn dtls_peer_fingerprint(conn: &DTLSConn) -> Option<String> {
+    let state = conn.connection_state().await;
+    state
+        .peer_certificates
+        .first()
+        .map(|cert| crypto::generate_fingerprint(cert))
+}
+
+/// Dial one address with TLS 1.3 over TCP, reusing the session
+/// certificate and the tunnel's rustls configuration.
+async fn connect_tcp(
+    addr: SocketAddr,
+    cert: Certificate,
+) -> Result<Dialed, (SocketAddr, HopDeckConnectionError)> {
+    log::info!("connecting to {addr} over tcp ...");
+    let config =
+        tunnel::tls::client_config(&cert).map_err(|e| (addr, HopDeckConnectionError::Tls(e)))?;
+    let connector = TlsConnector::from(Arc::new(config));
+    let tcp = match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+        Err(_) => return Err((addr, HopDeckConnectionError::Timeout)),
+        Ok(Err(e)) => return Err((addr, HopDeckConnectionError::Tcp(e))),
+        Ok(Ok(tcp)) => tcp,
+    };
+    if let Err(e) = tcp.set_nodelay(true) {
+        log::debug!("{addr}: TCP_NODELAY failed: {e}");
+    }
+    let server_name = ServerName::try_from("ignored").expect("static server name");
+    let stream = match tokio::time::timeout(
+        TCP_CONNECT_TIMEOUT,
+        connector.connect(server_name, tcp),
+    )
+    .await
+    {
+        Err(_) => return Err((addr, HopDeckConnectionError::Timeout)),
+        Ok(Err(e)) => return Err((addr, HopDeckConnectionError::Tcp(e))),
+        Ok(Ok(stream)) => stream,
+    };
+    let peer_fingerprint = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(tunnel::tls::peer_fingerprint);
+    let conn =
+        tcp_transport::client_conn(stream).map_err(|e| (addr, HopDeckConnectionError::Tcp(e)))?;
+    Ok(Dialed {
+        conn: tcp_transport::into_conn(conn),
+        addr,
+        transport: TransportKind::Tcp,
+        peer_fingerprint,
+    })
 }
 
 /// Time the preferred address gets to handshake alone before the
@@ -270,11 +421,54 @@ async fn connect(
 /// broken preferred path only slightly delays connect.
 const PREFERRED_ADDR_HEAD_START: Duration = Duration::from_millis(200);
 
-async fn connect_any(
+/// What a transport race learned, so the caller can decide whether
+/// switching transport makes sense at all.
+#[derive(Default)]
+struct DialFailures {
+    /// At least one address answered and then refused us: a bad
+    /// fingerprint, a failed access password, a foreign service on the
+    /// port. The peer is reachable.
+    rejected: bool,
+    /// At least one address failed purely in transit (timeout, refused,
+    /// unreachable) without any authentication-level answer.
+    unreachable: bool,
+    last: Option<HopDeckConnectionError>,
+}
+
+impl DialFailures {
+    fn record(&mut self, error: HopDeckConnectionError) {
+        if error.is_transport_failure() {
+            self.unreachable = true;
+        } else {
+            self.rejected = true;
+        }
+        self.last = Some(error);
+    }
+
+    /// Trying another transport is only justified when nothing answered on
+    /// this one. Any authentication-level refusal means another transport
+    /// would hit the same wall on the same peer.
+    fn transport_unreachable(&self) -> bool {
+        self.unreachable && !self.rejected
+    }
+
+    fn into_error(self) -> HopDeckConnectionError {
+        self.last.unwrap_or(HopDeckConnectionError::NotConnected)
+    }
+}
+
+async fn race_addrs<F, Fut>(
     addrs: &[SocketAddr],
     preferred: Option<SocketAddr>,
     cert: Certificate,
-) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), HopDeckConnectionError> {
+    dial: F,
+) -> Result<Dialed, DialFailures>
+where
+    F: Fn(SocketAddr, Certificate) -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<Dialed, (SocketAddr, HopDeckConnectionError)>>
+        + 'static,
+{
+    let mut failures = DialFailures::default();
     let mut joinset = JoinSet::new();
     if let Some(p) = preferred {
         // Dial the peer's mDNS-advertised primary first. If it
@@ -282,15 +476,18 @@ async fn connect_any(
         // before the others even start — the dialer biases toward
         // the OS-preferred interface (Mac service order, Linux
         // default route) without relying on RTT racing alone.
-        joinset.spawn_local(connect(p, cert.clone()));
+        joinset.spawn_local(dial(p, cert.clone()));
         let head_start = tokio::time::sleep(PREFERRED_ADDR_HEAD_START);
         tokio::pin!(head_start);
         loop {
             tokio::select! {
                 _ = &mut head_start => break,
                 Some(r) = joinset.join_next() => match r.expect("join error") {
-                    Ok(conn) => return Ok(conn),
-                    Err((a, e)) => log::warn!("failed to connect to {a}: `{e}`"),
+                    Ok(dialed) => return Ok(dialed),
+                    Err((a, e)) => {
+                        log::warn!("failed to connect to {a}: `{e}`");
+                        failures.record(e);
+                    }
                 },
             }
         }
@@ -300,19 +497,121 @@ async fn connect_any(
             // already racing; don't dial the same socket twice
             continue;
         }
-        joinset.spawn_local(connect(addr, cert.clone()));
+        joinset.spawn_local(dial(addr, cert.clone()));
     }
     loop {
         match joinset.join_next().await {
-            None => return Err(HopDeckConnectionError::NotConnected),
+            None => return Err(failures),
             Some(r) => match r.expect("join error") {
-                Ok(conn) => return Ok(conn),
+                Ok(dialed) => return Ok(dialed),
                 Err((a, e)) => {
-                    log::warn!("failed to connect to {a}: `{e}`")
+                    log::warn!("failed to connect to {a}: `{e}`");
+                    failures.record(e);
                 }
             },
         };
     }
+}
+
+/// Race every candidate address on one transport. `budget` bounds the
+/// whole race (used by `Auto`'s short UDP window); `None` keeps the
+/// historical per-address timeouts only.
+async fn connect_any(
+    addrs: &[SocketAddr],
+    preferred: Option<SocketAddr>,
+    cert: Certificate,
+    transport: TransportKind,
+    budget: Option<Duration>,
+) -> Result<Dialed, DialFailures> {
+    // The two branches are different `impl Future` types, so box the
+    // race to share the timeout wrapper below.
+    let race: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Dialed, DialFailures>>>> =
+        match transport {
+            TransportKind::Udp => Box::pin(race_addrs(addrs, preferred, cert, connect)),
+            TransportKind::Tcp => Box::pin(race_addrs(addrs, preferred, cert, connect_tcp)),
+        };
+    match budget {
+        None => race.await,
+        Some(budget) => match tokio::time::timeout(budget, race).await {
+            Ok(result) => result,
+            Err(_) => {
+                log::info!(
+                    "no {transport} handshake within {budget:?} — treating the path as \
+                     unreachable"
+                );
+                Err(DialFailures {
+                    unreachable: true,
+                    ..Default::default()
+                })
+            }
+        },
+    }
+}
+
+/// Ordered transports to attempt for one dial.
+///
+/// `Auto` prefers whichever transport last succeeded for this peer
+/// (remembered in memory for the daemon's lifetime) so a reconnect on a
+/// one-way-UDP network does not pay the UDP timeout again. With no cached
+/// answer UDP goes first; even a cached TCP answer keeps a single UDP
+/// retry so the session returns to the lower-latency path once the
+/// network heals.
+fn transport_plan(mode: TransportMode, cached: Option<TransportKind>) -> Vec<TransportKind> {
+    match mode {
+        TransportMode::Udp => vec![TransportKind::Udp],
+        TransportMode::Tcp => vec![TransportKind::Tcp],
+        TransportMode::Auto => match cached {
+            Some(TransportKind::Tcp) => vec![TransportKind::Tcp, TransportKind::Udp],
+            _ => vec![TransportKind::Udp, TransportKind::Tcp],
+        },
+    }
+}
+
+/// Walk the transport plan for one dial. Returns the dial result plus the
+/// transports actually attempted, in order (observability and tests).
+///
+/// A transport is only followed by the next one when its failure was a
+/// pure transport failure — see [`DialFailures::transport_unreachable`].
+async fn dial_transports(
+    addrs: &[SocketAddr],
+    preferred: Option<SocketAddr>,
+    cert: Certificate,
+    mode: TransportMode,
+    cached: Option<TransportKind>,
+) -> (Result<Dialed, HopDeckConnectionError>, Vec<TransportKind>) {
+    let plan = transport_plan(mode, cached);
+    let mut attempted = Vec::with_capacity(plan.len());
+    let mut last_error = None;
+    for (index, transport) in plan.iter().copied().enumerate() {
+        attempted.push(transport);
+        // `Auto` gives UDP a short window: it is the lower-latency path,
+        // so a working UDP link must win, but a network that drops UDP
+        // one-way must not cost the full handshake timeout on every
+        // reconnect.
+        let budget = match (mode, transport) {
+            (TransportMode::Auto, TransportKind::Udp) => Some(AUTO_UDP_TIMEOUT),
+            _ => None,
+        };
+        match connect_any(addrs, preferred, cert.clone(), transport, budget).await {
+            Ok(dialed) => return (Ok(dialed), attempted),
+            Err(failures) => {
+                let next = plan.get(index + 1).copied();
+                let retry = next.is_some() && failures.transport_unreachable();
+                last_error = Some(failures.into_error());
+                if !retry {
+                    break;
+                }
+                log::info!(
+                    "peer unreachable over {transport} — falling back to {}",
+                    next.expect("checked above")
+                );
+            }
+        }
+    }
+    (
+        Err(last_error.unwrap_or(HopDeckConnectionError::NotConnected)),
+        attempted,
+    )
 }
 
 pub(crate) struct HopDeckConnection {
@@ -359,6 +658,12 @@ pub(crate) struct HopDeckConnection {
     /// rejected password is dropped so the next attempt prompts again.
     /// A plain std mutex: only short, await-free lookups.
     pending_passwords: Rc<std::sync::Mutex<HashMap<IpAddr, String>>>,
+    /// Last transport that successfully carried a session to each peer.
+    /// `Auto` dials that transport first so a reconnect on a
+    /// one-way-UDP network skips the UDP timeout. In memory only; a
+    /// restart re-probes from UDP, which is the safe default (a stale
+    /// TCP preference would survive a network move that restored UDP).
+    transport_cache: Rc<RefCell<HashMap<ClientHandle, TransportKind>>>,
 }
 
 impl HopDeckConnection {
@@ -383,6 +688,7 @@ impl HopDeckConnection {
             reverse_adopt,
             retry_state: Default::default(),
             pending_passwords: Default::default(),
+            transport_cache: Default::default(),
         }
     }
 
@@ -456,6 +762,7 @@ impl HopDeckConnection {
             reverse_adopt: self.reverse_adopt.clone(),
             retry_state: self.retry_state.clone(),
             pending_passwords: self.pending_passwords.clone(),
+            transport_cache: self.transport_cache.clone(),
         }
     }
 
@@ -571,6 +878,7 @@ impl HopDeckConnection {
                 self.reverse_adopt.clone(),
                 self.retry_state.clone(),
                 self.pending_passwords.clone(),
+                self.transport_cache.clone(),
             ));
         }
         Err(HopDeckConnectionError::NotConnected)
@@ -720,9 +1028,18 @@ impl HopDeckConnection {
         handle: ClientHandle,
         conn: ArcConn,
         addr: SocketAddr,
+        fingerprint: Option<String>,
+        transport: TransportKind,
     ) {
-        log::info!("client ({handle}) adopting inbound transport from {addr}");
-        record_peer_fingerprint(&self.client_manager, handle, &conn).await;
+        log::info!("client ({handle}) adopting inbound {transport} transport from {addr}");
+        link_peer_fingerprint(
+            &self.client_manager,
+            handle,
+            fingerprint.as_deref(),
+            transport,
+        );
+        self.transport_cache.borrow_mut().insert(handle, transport);
+        self.client_manager.set_transport(handle, Some(transport));
         let session = self.sessions.allocate(handle);
         // Input stays gated until the adopted peer completes the
         // protocol handshake and answers a ping, same as after a dial.
@@ -857,21 +1174,19 @@ async fn finish_failed_dial(
 /// authorized entry went stale shows 「未信任」 even mid-session.
 /// `set_peer_fingerprint` marks the client dirty; the service's
 /// periodic frontend sync re-broadcasts it — no dedicated event.
-async fn record_peer_fingerprint(
+fn link_peer_fingerprint(
     client_manager: &ClientManager,
     handle: ClientHandle,
-    conn: &ArcConn,
+    fingerprint: Option<&str>,
+    transport: TransportKind,
 ) {
-    let Some(dtls) = conn.as_any().downcast_ref::<DTLSConn>() else {
+    let Some(fingerprint) = fingerprint else {
         return;
     };
-    let state = dtls.connection_state().await;
-    let Some(cert) = state.peer_certificates.first() else {
-        return;
-    };
-    let fingerprint = crypto::generate_fingerprint(cert);
-    if client_manager.set_peer_fingerprint(handle, Some(fingerprint.clone())) {
-        log::info!("client {handle}: peer fingerprint {fingerprint} linked from the session");
+    if client_manager.set_peer_fingerprint(handle, Some(fingerprint.to_owned())) {
+        log::info!(
+            "client {handle}: peer fingerprint {fingerprint} linked from the {transport} session"
+        );
     }
 }
 
@@ -891,6 +1206,7 @@ async fn connect_to_handle(
     reverse_adopt: Option<Sender<EmulationRequest>>,
     retry_state: Rc<RefCell<HashMap<ClientHandle, RetryState>>>,
     pending_passwords: Rc<std::sync::Mutex<HashMap<IpAddr, String>>>,
+    transport_cache: Rc<RefCell<HashMap<ClientHandle, TransportKind>>>,
 ) -> Result<(), HopDeckConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
@@ -936,19 +1252,32 @@ async fn connect_to_handle(
                 }
             },
         };
-        log::info!("client ({handle}) connecting ... (ips: {addrs:?}, preferred: {preferred:?})");
+        let mode = client_manager.transport_mode(handle);
+        let cached = transport_cache.borrow().get(&handle).copied();
+        let plan = transport_plan(mode, cached);
+        log::info!(
+            "client ({handle}) connecting ... (ips: {addrs:?}, preferred: {preferred:?}, \
+             transport: {mode}, plan: {plan:?})"
+        );
         if addrs.is_empty() && preferred.is_none() {
             // Nothing to dial. Bump backoff and bail without spawning
-            // DTLS work or spamming logs on every subsequent mouse
+            // DTLS/TLS work or spamming logs on every subsequent mouse
             // event — `should_attempt` will keep gating until either
             // the backoff elapses or new info arrives.
             record_retry_failure(&retry_state, handle, &ips_set, primary_ip);
             finish_failed_dial(&connecting, &sessions, handle, session).await;
             return Err(HopDeckConnectionError::NotConnected);
         }
-        let res = connect_any(&addrs, preferred, cert).await;
-        let (conn, addr) = match res {
-            Ok(c) => c,
+        let (result, attempted) =
+            dial_transports(&addrs, preferred, cert.clone(), mode, cached).await;
+        log::debug!("client ({handle}) attempted transports: {attempted:?}");
+        let Dialed {
+            conn,
+            addr,
+            transport,
+            peer_fingerprint,
+        } = match result {
+            Ok(dialed) => dialed,
             Err(e) => {
                 record_retry_failure(&retry_state, handle, &ips_set, primary_ip);
                 finish_failed_dial(&connecting, &sessions, handle, session).await;
@@ -965,8 +1294,17 @@ async fn connect_to_handle(
             );
             return Err(HopDeckConnectionError::NotConnected);
         }
-        log::info!("client ({handle}) connected @ {addr}");
-        record_peer_fingerprint(&client_manager, handle, &conn).await;
+        log::info!("client ({handle}) connected over {transport} @ {addr}");
+        link_peer_fingerprint(
+            &client_manager,
+            handle,
+            peer_fingerprint.as_deref(),
+            transport,
+        );
+        // Remember the transport that worked so a reconnect on this
+        // network skips the failed path (Auto dials the cached one first).
+        transport_cache.borrow_mut().insert(handle, transport);
+        client_manager.set_transport(handle, Some(transport));
 
         // Reverse-connect: this host dials *out* to its controller
         // because the controller cannot reach it inbound, and the
@@ -995,18 +1333,37 @@ async fn connect_to_handle(
                 ping_response.borrow_mut().remove(&(addr, replaced.session));
                 ping_sent_at.borrow_mut().remove(&(addr, replaced.session));
                 log::info!(
-                    "replacing prior outbound DTLS session {} for {addr}",
+                    "replacing prior outbound session {} for {addr}",
                     replaced.session
                 );
                 let _ = replaced.conn.close().await;
             }
             remove_connecting_if_current(&connecting, handle, session).await;
             retry_state.borrow_mut().remove(&handle);
+            // A reverse session is adopted by our own listener, which
+            // surfaces it like any inbound accept — including the peer
+            // fingerprint for the trust view. Without one we cannot
+            // register it; fail cleanly instead of leaving a slot the
+            // listener never reads.
+            let Some(adopt_fingerprint) = peer_fingerprint.clone() else {
+                log::warn!(
+                    "client {handle} reverse {transport} session presented no peer \
+                     certificate; closing dialed connection"
+                );
+                let _ = conn.close().await;
+                sessions.remove_if_current(handle, session);
+                client_manager.set_alive(handle, false);
+                client_manager.set_active_addr(handle, None);
+                client_manager.set_transport(handle, None);
+                return Ok(());
+            };
             match &reverse_adopt {
                 Some(adopt) => adopt
                     .send(EmulationRequest::AdoptReverse {
                         addr,
                         conn: conn.clone(),
+                        fingerprint: adopt_fingerprint,
+                        transport,
                     })
                     .expect("channel closed"),
                 None => {
@@ -1021,6 +1378,7 @@ async fn connect_to_handle(
                     sessions.remove_if_current(handle, session);
                     client_manager.set_alive(handle, false);
                     client_manager.set_active_addr(handle, None);
+                    client_manager.set_transport(handle, None);
                 }
             }
             return Ok(());
@@ -1045,7 +1403,7 @@ async fn connect_to_handle(
             ping_response.borrow_mut().remove(&(addr, replaced.session));
             ping_sent_at.borrow_mut().remove(&(addr, replaced.session));
             log::info!(
-                "replacing prior outbound DTLS session {} for {addr}",
+                "replacing prior outbound session {} for {addr}",
                 replaced.session
             );
             let _ = replaced.conn.close().await;
@@ -1560,6 +1918,7 @@ async fn disconnect(
             client_manager.set_alive(handle, false);
             client_manager.set_active_addr(handle, None);
             client_manager.set_peer_commit(handle, None);
+            client_manager.set_transport(handle, None);
         }
         sessions.remove_if_current(handle, session);
         let _ = tx.send(HopDeckConnectionEvent::Disconnected { handle, session });
@@ -1582,9 +1941,221 @@ fn clear_session_ping_state(
 mod tests {
     use super::*;
     use input_event::{Event, KeyboardEvent, PointerEvent, display::DisplayLayout};
+    use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use webrtc_dtls::config::ClientAuthType::RequireAnyClientCert;
+    use webrtc_util::conn::Listener;
 
     fn connection_map() -> Mutex<HashMap<SocketAddr, ConnectionSlot>> {
         Mutex::new(HashMap::new())
+    }
+
+    #[test]
+    fn transport_plan_matches_the_configured_mode() {
+        // Auto: UDP first with no history; a cached TCP answer goes first
+        // but keeps one UDP retry.
+        assert_eq!(
+            transport_plan(TransportMode::Auto, None),
+            vec![TransportKind::Udp, TransportKind::Tcp]
+        );
+        assert_eq!(
+            transport_plan(TransportMode::Auto, Some(TransportKind::Udp)),
+            vec![TransportKind::Udp, TransportKind::Tcp]
+        );
+        assert_eq!(
+            transport_plan(TransportMode::Auto, Some(TransportKind::Tcp)),
+            vec![TransportKind::Tcp, TransportKind::Udp]
+        );
+        // Forced modes never touch the other transport.
+        assert_eq!(
+            transport_plan(TransportMode::Udp, Some(TransportKind::Tcp)),
+            vec![TransportKind::Udp]
+        );
+        assert_eq!(
+            transport_plan(TransportMode::Tcp, Some(TransportKind::Udp)),
+            vec![TransportKind::Tcp]
+        );
+    }
+
+    #[test]
+    fn only_pure_transport_failures_allow_a_fallback() {
+        let mut timeout = DialFailures::default();
+        timeout.record(HopDeckConnectionError::Timeout);
+        assert!(timeout.transport_unreachable(), "timeout → fallback");
+
+        let mut refused = DialFailures::default();
+        refused.record(HopDeckConnectionError::Bind(io::Error::from(
+            io::ErrorKind::ConnectionRefused,
+        )));
+        assert!(refused.transport_unreachable(), "refused → fallback");
+
+        // A peer that answered with a fatal DTLS alert is reachable; a TCP
+        // retry would only repeat the refusal (and the authorization
+        // prompt).
+        let mut rejected = DialFailures::default();
+        rejected.record(HopDeckConnectionError::Dtls(
+            webrtc_dtls::Error::ErrAlertFatalOrClose,
+        ));
+        assert!(!rejected.transport_unreachable(), "alert → no fallback");
+
+        let mut cert_rejected = DialFailures::default();
+        cert_rejected.record(HopDeckConnectionError::Dtls(
+            webrtc_dtls::Error::ErrVerifyDataMismatch,
+        ));
+        assert!(
+            !cert_rejected.transport_unreachable(),
+            "verify mismatch → no fallback"
+        );
+
+        // One address timing out and another refusing the certificate
+        // means the peer is reachable: the rejection wins.
+        let mut mixed = DialFailures::default();
+        mixed.record(HopDeckConnectionError::Timeout);
+        mixed.record(HopDeckConnectionError::Dtls(
+            webrtc_dtls::Error::ErrVerifyDataMismatch,
+        ));
+        assert!(!mixed.transport_unreachable());
+    }
+
+    #[test]
+    fn tls_and_emulation_refusals_are_not_transport_failures() {
+        assert!(!HopDeckConnectionError::TargetEmulationDisabled.is_transport_failure());
+        assert!(
+            !HopDeckConnectionError::Webrtc(webrtc_util::Error::Other("local".into()))
+                .is_transport_failure()
+        );
+        assert!(
+            HopDeckConnectionError::Tcp(io::Error::from(io::ErrorKind::HostUnreachable))
+                .is_transport_failure()
+        );
+    }
+
+    /// The core fallback acceptance case end to end over loopback: nothing
+    /// answers on UDP, TLS/TCP does, `Auto` selects TCP, and the wire
+    /// framing carries real protocol events in both directions.
+    #[tokio::test]
+    async fn auto_falls_back_to_tcp_and_frames_round_trip() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server_cert =
+                    Certificate::generate_self_signed(["hopdeck-tcp-server".to_owned()])
+                        .expect("server certificate");
+                let client_cert =
+                    Certificate::generate_self_signed(["hopdeck-tcp-client".to_owned()])
+                        .expect("client certificate");
+                let server_fingerprint = crypto::certificate_fingerprint(&server_cert);
+
+                let tcp = TcpListener::bind("127.0.0.1:0").await.expect("bind tcp");
+                let addr = tcp.local_addr().expect("tcp address");
+                let acceptor = TlsAcceptor::from(Arc::new(
+                    tunnel::tls::server_config(&server_cert).expect("server TLS config"),
+                ));
+                let server = tokio::spawn(async move {
+                    let (stream, _) = tcp.accept().await.expect("accept tcp");
+                    let stream = acceptor.accept(stream).await.expect("tls accept");
+                    let conn = tcp_transport::into_conn(
+                        tcp_transport::server_conn(stream).expect("wrap tls stream"),
+                    );
+                    let mut buf = [0u8; MAX_EVENT_SIZE];
+                    let n = conn.recv(&mut buf).await.expect("recv hello");
+                    let hello = decode_fixed_event(&buf[..n]).expect("decode hello");
+                    let (pong, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::Pong(true).into();
+                    conn.send(&pong[..len]).await.expect("send pong");
+                    hello
+                });
+
+                // `addr` has no UDP listener: the UDP dial is refused
+                // immediately on loopback, so the test is not waiting out
+                // the 2s auto budget.
+                let (result, attempted) =
+                    dial_transports(&[addr], None, client_cert, TransportMode::Auto, None).await;
+                assert_eq!(
+                    attempted,
+                    vec![TransportKind::Udp, TransportKind::Tcp],
+                    "UDP must be tried first, TCP as the fallback"
+                );
+                let dialed = result.expect("auto dial over TCP");
+                assert_eq!(dialed.transport, TransportKind::Tcp);
+                assert_eq!(dialed.addr, addr);
+                assert_eq!(
+                    dialed.peer_fingerprint.as_deref(),
+                    Some(server_fingerprint.as_str()),
+                    "the dialed side records the server's leaf fingerprint"
+                );
+
+                let (hello, len): ([u8; MAX_EVENT_SIZE], usize) =
+                    ProtoEvent::hello(*b"deadbeef").into();
+                dialed.conn.send(&hello[..len]).await.expect("send hello");
+                let mut buf = [0u8; MAX_EVENT_SIZE];
+                let n = dialed.conn.recv(&mut buf).await.expect("recv pong");
+                assert!(matches!(
+                    decode_fixed_event(&buf[..n]),
+                    Ok(ProtoEvent::Pong(true))
+                ));
+
+                let server_saw = server.await.expect("server task");
+                assert!(matches!(
+                    server_saw,
+                    ProtoEvent::Hello { magic, .. } if magic == PROTOCOL_MAGIC
+                ));
+            })
+            .await;
+    }
+
+    /// UDP stays the preferred path when it answers: the dial completes on
+    /// UDP and never touches the TCP fallback.
+    #[tokio::test]
+    async fn auto_stays_on_udp_when_the_peer_answers() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server_cert =
+                    Certificate::generate_self_signed(["hopdeck-udp-server".to_owned()])
+                        .expect("server certificate");
+                let client_cert =
+                    Certificate::generate_self_signed(["hopdeck-udp-client".to_owned()])
+                        .expect("client certificate");
+                let server_fingerprint = crypto::certificate_fingerprint(&server_cert);
+
+                let config = Config {
+                    certificates: vec![server_cert],
+                    extended_master_secret: ExtendedMasterSecretType::Require,
+                    client_auth: RequireAnyClientCert,
+                    verify_peer_certificate: Some(Arc::new(|_, _| Ok(()))),
+                    ..Default::default()
+                };
+                let listen_addr: SocketAddr = "127.0.0.1:0".parse().expect("listen address");
+                let listener = webrtc_dtls::listener::listen(listen_addr, config)
+                    .await
+                    .expect("listen udp");
+                let addr = listener.addr().await.expect("dtls address");
+                let server = tokio::spawn(async move {
+                    let (conn, _peer) = listener.accept().await.expect("dtls accept");
+                    let mut buf = [0u8; MAX_EVENT_SIZE];
+                    conn.recv(&mut buf).await.expect("recv over dtls");
+                    conn
+                });
+
+                let (result, attempted) =
+                    dial_transports(&[addr], None, client_cert, TransportMode::Auto, None).await;
+                assert_eq!(
+                    attempted,
+                    vec![TransportKind::Udp],
+                    "a healthy UDP peer must not trigger the TCP dial"
+                );
+                let dialed = result.expect("auto dial over UDP");
+                assert_eq!(dialed.transport, TransportKind::Udp);
+                assert_eq!(
+                    dialed.peer_fingerprint.as_deref(),
+                    Some(server_fingerprint.as_str())
+                );
+
+                let (ping, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::Ping.into();
+                dialed.conn.send(&ping[..len]).await.expect("send ping");
+                let _server_conn = server.await.expect("server task");
+            })
+            .await;
     }
 
     async fn test_conn() -> ArcConn {

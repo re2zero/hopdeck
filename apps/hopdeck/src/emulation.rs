@@ -1,7 +1,7 @@
 use crate::config::local_commit;
 use crate::listen::{HopDeckListener, ListenEvent, ListenerCreationError, ListenerSession};
 use futures::StreamExt;
-use hopdeck_ipc::IncomingPeerConfig;
+use hopdeck_ipc::{IncomingPeerConfig, TransportKind};
 use hopdeck_proto::{
     CAP_TRANSACTIONAL_HANDOVER, HandoverWarpStatus, HostInputState, LEAVE_HANDOVER,
     LEAVE_RELEASE_ONLY, Position, ProtoEvent,
@@ -212,10 +212,12 @@ pub(crate) struct Emulation {
 pub(crate) enum EmulationEvent {
     Connected {
         addr: SocketAddr,
-        /// Exact inbound DTLS generation that replaced any prior connection
-        /// from the same source address.
+        /// Exact inbound transport generation that replaced any prior
+        /// connection from the same source address.
         session: ListenerSession,
         fingerprint: String,
+        /// Transport that carried the session (UDP DTLS or TCP TLS).
+        transport: TransportKind,
     },
     ConnectionAttempt {
         fingerprint: String,
@@ -303,10 +305,14 @@ pub(crate) enum EmulationRequest {
     /// Reverse-connect, controlled side: a connection *we* dialed out
     /// is registered with the listener so the ordinary inbound
     /// pipeline (Hello watchdog, heartbeat, injection, replies) owns
-    /// it. See [`HopDeckListener::adopt`].
+    /// it. See [`HopDeckListener::adopt`]. The peer identity captured at
+    /// the dial's handshake travels with it, so adoption needs no
+    /// transport-specific downcast.
     AdoptReverse {
         addr: SocketAddr,
         conn: Arc<dyn Conn + Send + Sync>,
+        fingerprint: String,
+        transport: TransportKind,
     },
     /// Reverse-connect, controller side: hand a still-current inbound
     /// transport back to the caller (the capture side) and retire its
@@ -1104,7 +1110,7 @@ impl ListenTask {
                             _ => {}
                         }
                     }
-                    Some(ListenEvent::Accept { addr, session, fingerprint }) => {
+                    Some(ListenEvent::Accept { addr, session, fingerprint, transport }) => {
                         // A reused UDP address is a distinct authenticated
                         // session. Do not let the old heartbeat make it look
                         // responsive before this connection speaks.
@@ -1118,7 +1124,9 @@ impl ListenTask {
                         // session before a same-address replacement can send
                         // input. This releases its pressed keys in the backend.
                         self.emulation_proxy.forget(addr);
-                        log::debug!("accepted inbound DTLS session {session} from {addr}");
+                        log::debug!(
+                            "accepted inbound {transport} session {session} from {addr}"
+                        );
                         // A new authenticated session starts in unknown/unlocked
                         // transport state. A still-locked sender immediately
                         // re-publishes Locked from its retained recovery state.
@@ -1134,6 +1142,7 @@ impl ListenTask {
                             addr,
                             session,
                             fingerprint,
+                            transport,
                         }).expect("channel closed");
                     }
                     Some(ListenEvent::Disconnected { addr, session }) => {
@@ -1244,8 +1253,8 @@ impl ListenTask {
                             }
                         }
                     }
-                    EmulationRequest::AdoptReverse { addr, conn } => {
-                        self.listener.adopt(addr, conn).await;
+                    EmulationRequest::AdoptReverse { addr, conn, fingerprint, transport } => {
+                        self.listener.adopt(addr, conn, fingerprint, transport).await;
                     }
                     EmulationRequest::TakeConn {
                         addr,
