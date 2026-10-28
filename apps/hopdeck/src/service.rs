@@ -15,7 +15,7 @@ use futures::StreamExt;
 use hopdeck_ipc::{
     AppIdent, AsyncFrontendListener, ClientConfig, ClientHandle, ConnectMode, ConnectionMode,
     DEFAULT_PORT, FrontendEvent, FrontendRequest, HostKind, IncomingPeerConfig, IpcError,
-    IpcListenerCreationError, Position, RemoteHostState, Status, TransportKind,
+    IpcListenerCreationError, Position, RemoteHostState, Status, TransportKind, TransportMode,
 };
 use hopdeck_proto::ProtoEvent;
 use input_capture::clipboard::{ClipboardMonitor, SuppressionList};
@@ -34,6 +34,12 @@ use std::{
 use thiserror::Error;
 use tokio::{process::Command, signal, sync::Notify};
 use webrtc_dtls::crypto::Certificate;
+
+/// How often an `Auto` peer riding the TCP fallback is re-probed for UDP.
+/// UDP is the lower-latency path, but a one-way network can keep it
+/// dropped for a long time — a cheap background probe lets the session
+/// return as soon as the path heals.
+const UDP_REPROBE_INTERVAL: Duration = Duration::from_secs(600);
 
 async fn shutdown_signal() -> io::Result<()> {
     #[cfg(unix)]
@@ -462,6 +468,16 @@ impl Service {
         let mut frontend_sync_tick = tokio::time::interval(Duration::from_secs(2));
         frontend_sync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Background UDP re-probe: an Auto client parked on the TCP
+        // fallback must return to UDP once the network heals. Probes are
+        // cheap and non-disruptive (see `reprobe_udp`), but they do put a
+        // throwaway handshake on the peer, so keep them apart.
+        let mut udp_reprobe_tick = tokio::time::interval(UDP_REPROBE_INTERVAL);
+        udp_reprobe_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Skip the immediate first tick: a session that just came up over
+        // TCP already tried UDP seconds ago.
+        udp_reprobe_tick.tick().await;
+
         loop {
             tokio::select! {
                 request = self.frontend_listener.next() => self.handle_frontend_request(request).await,
@@ -476,7 +492,8 @@ impl Service {
                 _ = self.config.changed() => self.handle_config_change().await,
                 _ = discovery_refresh_tick.tick() => self.on_discovery_refresh().await,
                 _ = reverse_dial_tick.tick() => self.on_reverse_dial_tick().await,
-                _ = frontend_sync_tick.tick() => self.on_frontend_sync_tick(),
+                _ = udp_reprobe_tick.tick() => self.on_udp_reprobe_tick().await,
+                _ = frontend_sync_tick.tick() => self.on_frontend_sync_tick().await,
                 event = recv_clipboard(&mut self.clipboard_monitor) => {
                     self.handle_local_clipboard_event(event).await;
                 }
@@ -918,6 +935,7 @@ impl Service {
                     require_crossing_modifier: c.require_crossing_modifier,
                     crossing_modifier: c.crossing_modifier,
                     transport: c.transport,
+                    last_transport: c.last_transport,
                     tunnel_forwards,
                     tunnel_port,
                 }
@@ -1088,6 +1106,9 @@ impl Service {
                         .set_peer_fingerprint(handle, Some(fingerprint.clone()));
                     let transport_changed =
                         self.client_manager.set_transport(handle, Some(transport));
+                    // Persist the path that actually worked; the next
+                    // daemon start dials it first.
+                    self.client_manager.set_last_transport(handle, transport);
                     if fingerprint_changed || transport_changed {
                         self.broadcast_client(handle);
                     }
@@ -1575,18 +1596,47 @@ impl Service {
     /// mutated state silently (Pong liveness, Hello commit, latency
     /// samples — see `ClientManager::take_client_states_dirty`).
     /// Idempotent snapshots: frontends dedupe by content.
-    fn on_frontend_sync_tick(&mut self) {
-        if !self.client_manager.take_client_states_dirty() {
-            return;
+    async fn on_frontend_sync_tick(&mut self) {
+        let last_transport_changed = self.client_manager.take_last_transport_dirty();
+        if self.client_manager.take_client_states_dirty() {
+            let handles: Vec<ClientHandle> = self
+                .client_manager
+                .get_client_states()
+                .into_iter()
+                .map(|(handle, _, _)| handle)
+                .collect();
+            for handle in handles {
+                self.broadcast_client(handle);
+            }
         }
-        let handles: Vec<ClientHandle> = self
+        if last_transport_changed {
+            // A session taught us which transport reaches this peer; that
+            // lives in ClientConfig, so persist it now instead of waiting
+            // for an unrelated user action.
+            self.save_config().await;
+        }
+    }
+
+    /// Re-probe UDP for `Auto` clients currently parked on the TCP
+    /// fallback. The connect layer only switches when the probe proves
+    /// UDP is reachable again, so a still-blocked path costs one short
+    /// probe and leaves the live TCP session untouched.
+    async fn on_udp_reprobe_tick(&mut self) {
+        let candidates: Vec<ClientHandle> = self
             .client_manager
             .get_client_states()
             .into_iter()
+            .filter(|(_, config, state)| {
+                config.transport == TransportMode::Auto
+                    && state.transport == Some(TransportKind::Tcp)
+                    && state.alive
+            })
             .map(|(handle, _, _)| handle)
             .collect();
-        for handle in handles {
-            self.broadcast_client(handle);
+        for handle in candidates {
+            if self.conn.reprobe_udp(handle).await {
+                log::info!("client {handle}: back on UDP after a successful reprobe");
+            }
         }
     }
 

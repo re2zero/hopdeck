@@ -24,6 +24,10 @@ pub struct ClientManager {
     /// alternative relay lives in the capture event loop, which is
     /// dead whenever no capture backend is available.
     client_states_dirty: Rc<Cell<bool>>,
+    /// Set when a session records its transport in `last_transport`. The
+    /// service owns config writes, so it polls this flag on its sync tick
+    /// and persists the newly learned preference.
+    last_transport_dirty: Rc<Cell<bool>>,
 }
 
 impl ClientManager {
@@ -51,6 +55,7 @@ impl ClientManager {
             require_crossing_modifier: config_client.require_crossing_modifier,
             crossing_modifier: config_client.crossing_modifier,
             transport: config_client.transport,
+            last_transport: config_client.last_transport,
         };
         let state = ClientState {
             active: config_client.active,
@@ -400,6 +405,41 @@ impl ClientManager {
             }
             _ => false,
         }
+    }
+
+    /// Transport of the last established session with this peer, if any.
+    /// Seed for the connect side's in-memory cache after a restart.
+    pub(crate) fn last_transport(&self, handle: ClientHandle) -> Option<TransportKind> {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .and_then(|(c, _)| c.last_transport)
+    }
+
+    /// Remember the transport a session actually established. Returns
+    /// `true` when the value changed; either way the persistence flag
+    /// only moves on a real change.
+    pub(crate) fn set_last_transport(
+        &self,
+        handle: ClientHandle,
+        transport: TransportKind,
+    ) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.last_transport != Some(transport) => {
+                c.last_transport = Some(transport);
+                self.last_transport_dirty.set(true);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a `last_transport` value was learned since the last
+    /// poll, clearing the flag.
+    pub(crate) fn take_last_transport_dirty(&self) -> bool {
+        let dirty = self.last_transport_dirty.get();
+        self.last_transport_dirty.set(false);
+        dirty
     }
 
     /// Whether any connect-side state mutated since the last poll,
@@ -817,6 +857,23 @@ mod tests {
         assert_eq!(cm.transport_mode(handle), TransportMode::Udp);
     }
 
+    #[test]
+    fn last_transport_is_learned_once_and_persisted_on_change() {
+        let (cm, handle) = manager_with_ips(&[]);
+        assert_eq!(cm.last_transport(handle), None);
+        assert!(!cm.take_last_transport_dirty());
+        assert!(cm.set_last_transport(handle, TransportKind::Tcp));
+        assert_eq!(cm.last_transport(handle), Some(TransportKind::Tcp));
+        assert!(cm.take_last_transport_dirty());
+        assert!(!cm.take_last_transport_dirty());
+        // Reconnecting over the same path must not dirty the config.
+        assert!(!cm.set_last_transport(handle, TransportKind::Tcp));
+        assert!(!cm.take_last_transport_dirty());
+        assert!(cm.set_last_transport(handle, TransportKind::Udp));
+        assert!(cm.take_last_transport_dirty());
+        assert_eq!(cm.last_transport(handle), Some(TransportKind::Udp));
+    }
+
     fn ip(a: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(192, 168, 1, a))
     }
@@ -838,6 +895,7 @@ mod tests {
             require_crossing_modifier: false,
             crossing_modifier: CrossingModifier::default(),
             transport: TransportMode::Auto,
+            last_transport: None,
             tunnel_forwards: Vec::new(),
             tunnel_port: crate::tunnel::DEFAULT_TUNNEL_PORT,
         });

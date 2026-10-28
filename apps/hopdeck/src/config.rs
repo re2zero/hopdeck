@@ -18,7 +18,7 @@ use toml_edit::{self, DocumentMut};
 use hopdeck_cli::CliArgs;
 use hopdeck_ipc::{
     ClipboardSuppression, ConnectMode, ConnectionMode, CrossingModifier, DEFAULT_PORT,
-    IncomingPeerConfig, Position, TransportMode,
+    IncomingPeerConfig, Position, TransportKind, TransportMode,
 };
 
 use crate::tunnel::{DEFAULT_TUNNEL_PORT, ForwardSpec, TargetAddr};
@@ -251,6 +251,11 @@ struct TomlClient {
     /// fallback). See [`hopdeck_ipc::TransportMode`].
     #[serde(default)]
     transport: Option<TransportMode>,
+    /// Transport the last established session used. Written after a
+    /// session comes up so a restart skips the failed path; `None`
+    /// (absent) until then. See [`hopdeck_ipc::ClientConfig::last_transport`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_transport: Option<TransportKind>,
 }
 
 impl ConfigToml {
@@ -518,6 +523,10 @@ pub struct ConfigClient {
     /// Preferred transport for the input session. Defaults to auto
     /// (UDP first, TLS over TCP when UDP is unreachable).
     pub transport: TransportMode,
+    /// Transport of the last established session, persisted so a daemon
+    /// restart dials the path that worked instead of repeating the Auto
+    /// UDP timeout. `None` until the first successful session.
+    pub last_transport: Option<TransportKind>,
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -563,6 +572,7 @@ impl From<TomlClient> for ConfigClient {
             tunnel_forwards,
             tunnel_port: toml.tunnel_port.unwrap_or(DEFAULT_TUNNEL_PORT),
             transport: toml.transport.unwrap_or_default(),
+            last_transport: toml.last_transport,
         }
     }
 }
@@ -658,6 +668,7 @@ impl From<ConfigClient> for TomlClient {
             tunnel_forwards,
             tunnel_port,
             transport,
+            last_transport: client.last_transport,
         }
     }
 }
@@ -1109,6 +1120,7 @@ mod connection_mode_tests {
             tunnel_forwards: Vec::new(),
             tunnel_port: DEFAULT_TUNNEL_PORT,
             transport: TransportMode::Auto,
+            last_transport: None,
         }
     }
 
@@ -1225,6 +1237,36 @@ mod connection_mode_tests {
             let back: ConfigClient = toml.into();
             assert_eq!(back.transport, transport);
         }
+    }
+
+    #[test]
+    fn last_transport_roundtrips_and_stays_absent_until_learned() {
+        // Never connected: no key in the file.
+        let toml: TomlClient = client_with(ConnectionMode::default(), HashMap::new()).into();
+        assert_eq!(toml.last_transport, None);
+
+        for last in [TransportKind::Udp, TransportKind::Tcp] {
+            let mut client = client_with(ConnectionMode::default(), HashMap::new());
+            client.last_transport = Some(last);
+            let toml: TomlClient = client.into();
+            assert_eq!(toml.last_transport, Some(last));
+            let back: ConfigClient = toml.into();
+            assert_eq!(back.last_transport, Some(last));
+        }
+    }
+
+    #[test]
+    fn legacy_toml_without_last_transport_starts_empty() {
+        let parsed: TomlClient = toml::from_str(
+            r#"
+            hostname = "host.local"
+            port = 4252
+            "#,
+        )
+        .expect("parse legacy client");
+        assert_eq!(parsed.last_transport, None);
+        let cc: ConfigClient = parsed.into();
+        assert_eq!(cc.last_transport, None);
     }
 
     #[test]

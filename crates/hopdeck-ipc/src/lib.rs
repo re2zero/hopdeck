@@ -418,6 +418,15 @@ pub struct ClientConfig {
     /// behavior (no fallback); `Tcp` forces the framed TLS path.
     #[serde(default)]
     pub transport: TransportMode,
+    /// Transport of the last *established* session with this peer,
+    /// persisted so a daemon restart reconnects straight over the path
+    /// that worked instead of paying the Auto UDP timeout again. This is
+    /// an observation, not a preference: [`Self::transport`] still owns
+    /// the policy, and `Auto` clients periodically re-probe UDP to
+    /// return to the lower-latency path once the network heals. `None`
+    /// for peers that never connected; omitted from `config.toml`.
+    #[serde(default)]
+    pub last_transport: Option<TransportKind>,
 }
 
 impl Default for ClientConfig {
@@ -436,6 +445,7 @@ impl Default for ClientConfig {
             crossing_modifier: CrossingModifier::default(),
             connect_mode: ConnectMode::default(),
             transport: TransportMode::default(),
+            last_transport: None,
         }
     }
 }
@@ -964,6 +974,14 @@ mod tests {
         )
         .expect("decode legacy config");
         assert_eq!(legacy.transport, TransportMode::Auto);
+        assert_eq!(legacy.last_transport, None);
+
+        let encoded = serde_json::to_value(ClientConfig {
+            last_transport: Some(TransportKind::Tcp),
+            ..Default::default()
+        })
+        .expect("encode config with last transport");
+        assert_eq!(encoded["last_transport"], "tcp");
 
         // The config spelling is the documented `auto|udp|tcp`.
         for (text, expected) in [

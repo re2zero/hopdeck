@@ -316,6 +316,12 @@ const TCP_CONNECT_TIMEOUT: Duration = DEFAULT_CONNECTION_TIMEOUT;
 /// starts.
 const AUTO_UDP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Budget for the background "can we go back to UDP?" probe. Same short
+/// window as the initial Auto fallback: a healthy UDP path handshakes
+/// well inside it, and a still-blocked one must not occupy the task for
+/// long.
+const UDP_REPROBE_TIMEOUT: Duration = AUTO_UDP_TIMEOUT;
+
 async fn connect(
     addr: SocketAddr,
     cert: Certificate,
@@ -551,7 +557,8 @@ async fn connect_any(
 /// Ordered transports to attempt for one dial.
 ///
 /// `Auto` prefers whichever transport last succeeded for this peer
-/// (remembered in memory for the daemon's lifetime) so a reconnect on a
+/// (remembered in memory for the daemon's lifetime and seeded from the
+/// persisted `last_transport` after a restart) so a reconnect on a
 /// one-way-UDP network does not pay the UDP timeout again. With no cached
 /// answer UDP goes first; even a cached TCP answer keeps a single UDP
 /// retry so the session returns to the lower-latency path once the
@@ -1011,6 +1018,84 @@ impl HopDeckConnection {
         self.retry_state.borrow_mut().remove(&handle);
     }
 
+    /// Try to move an `Auto` client that is riding the TCP fallback back
+    /// onto UDP. The probe dials (and immediately closes) a throwaway UDP
+    /// session first, so a network that still drops UDP costs only the
+    /// probe budget and never interrupts the live TCP session. On success
+    /// the cached transport is cleared and the session is re-dialed under
+    /// `Auto`'s normal UDP-first plan.
+    ///
+    /// Only meaningful for an *alive* session on TCP with
+    /// [`TransportMode::Auto`]: a forced `Tcp` preference means the user
+    /// chose the fallback, and a session already on UDP has nothing to
+    /// improve.
+    pub(crate) async fn reprobe_udp(&self, handle: ClientHandle) -> bool {
+        if self.client_manager.transport_mode(handle) != TransportMode::Auto {
+            return false;
+        }
+        let Some((_, state)) = self.client_manager.get_state(handle) else {
+            return false;
+        };
+        if !state.alive || state.transport != Some(TransportKind::Tcp) {
+            return false;
+        }
+        let port = self.client_manager.get_port(handle).unwrap_or(DEFAULT_PORT);
+        // Honor a per-network address lock: the probe must answer the
+        // same question the real dial would ask.
+        let addrs = match self.client_manager.get_active_lock(handle) {
+            Some(ip) => vec![SocketAddr::new(ip, port)],
+            None => self
+                .client_manager
+                .get_ips(handle)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect::<Vec<_>>(),
+        };
+        if addrs.is_empty() {
+            return false;
+        }
+        match connect_any(
+            &addrs,
+            None,
+            self.cert.clone(),
+            TransportKind::Udp,
+            Some(UDP_REPROBE_TIMEOUT),
+        )
+        .await
+        {
+            Ok(dialed) => {
+                // The probe authenticated and registered on the peer, but
+                // it exists only to answer "is UDP back?". Close it and
+                // let the normal dial path re-establish the session, so
+                // hello/ping/keepalive bookkeeping stays in one place.
+                let _ = dialed.conn.close().await;
+                log::info!("client {handle}: UDP reprobe succeeded — switching back from TCP");
+                // Seed the cache with the answer the probe just gave us:
+                // the next Auto dial must start at UDP. Removing the entry
+                // is not enough — the dial would fall back to the
+                // persisted `last_transport` (TCP) and pick the fallback
+                // again.
+                self.transport_cache
+                    .borrow_mut()
+                    .insert(handle, TransportKind::Udp);
+                self.reset_handle(handle).await;
+                // Kick the re-dial now instead of waiting for the next
+                // input event; the failure return is expected while the
+                // background dial is in flight.
+                let _ = self.send(ProtoEvent::Ping, handle).await;
+                true
+            }
+            Err(failures) => {
+                log::debug!(
+                    "client {handle}: UDP reprobe failed ({}) — staying on TCP",
+                    failures.into_error()
+                );
+                false
+            }
+        }
+    }
+
     /// Install a listener-accepted DTLS transport as `handle`'s
     /// capture send path — the controller half of reverse-connect.
     /// The inbound session was accepted by *our* listener because a
@@ -1040,6 +1125,7 @@ impl HopDeckConnection {
         );
         self.transport_cache.borrow_mut().insert(handle, transport);
         self.client_manager.set_transport(handle, Some(transport));
+        self.client_manager.set_last_transport(handle, transport);
         let session = self.sessions.allocate(handle);
         // Input stays gated until the adopted peer completes the
         // protocol handshake and answers a ping, same as after a dial.
@@ -1253,7 +1339,14 @@ async fn connect_to_handle(
             },
         };
         let mode = client_manager.transport_mode(handle);
-        let cached = transport_cache.borrow().get(&handle).copied();
+        // The in-memory cache wins (it reflects this daemon's sessions);
+        // after a restart fall back to the persisted last_transport so a
+        // one-way-UDP peer reconnects without paying the probe again.
+        let cached = transport_cache
+            .borrow()
+            .get(&handle)
+            .copied()
+            .or_else(|| client_manager.last_transport(handle));
         let plan = transport_plan(mode, cached);
         log::info!(
             "client ({handle}) connecting ... (ips: {addrs:?}, preferred: {preferred:?}, \
@@ -1305,6 +1398,9 @@ async fn connect_to_handle(
         // network skips the failed path (Auto dials the cached one first).
         transport_cache.borrow_mut().insert(handle, transport);
         client_manager.set_transport(handle, Some(transport));
+        // Persisted on the service's next sync tick: the next daemon
+        // start dials this path first instead of repeating the probe.
+        client_manager.set_last_transport(handle, transport);
 
         // Reverse-connect: this host dials *out* to its controller
         // because the controller cannot reach it inbound, and the
