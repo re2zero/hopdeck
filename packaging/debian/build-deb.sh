@@ -99,7 +99,7 @@ Version: $version
 Architecture: $arch
 Maintainer: $maintainer
 Installed-Size: $installed_size
-Depends: libc6, libgcc-s1, libx11-6, libxtst6, libxkbcommon0, libxkbcommon-x11-0
+Depends: libc6, libgcc1 | libgcc-s1, libx11-6, libxcb1, libxtst6, libxkbcommon0, libxkbcommon-x11-0
 Recommends: libwayland-client0, libwayland-cursor0, libvulkan1
 Section: net
 Priority: optional
