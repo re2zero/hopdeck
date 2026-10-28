@@ -10,12 +10,46 @@ use gpui_kit::{
     App, AppContext, Bounds, WindowBounds, WindowOptions, component::TitleBar, point, px, size,
 };
 
+/// Mesa's legacy `r600` driver (TeraScale GPUs such as Caicos) corrupts
+/// wgpu's GL rendering, and those GPUs have no hardware Vulkan either
+/// (RADV starts at GCN). wgpu therefore has no working accelerated path
+/// on them, so select Mesa's software rasterizer before EGL/GL
+/// initialises. An explicit `LIBGL_ALWAYS_SOFTWARE` in the environment
+/// wins (e.g. `0` to test a fixed driver).
+#[cfg(target_os = "linux")]
+fn force_software_gl_on_legacy_radeon() {
+    if std::env::var_os("LIBGL_ALWAYS_SOFTWARE").is_some() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("card") {
+            continue;
+        }
+        let Ok(driver) = std::fs::read_link(entry.path().join("device/driver")) else {
+            continue;
+        };
+        if driver.file_name().is_some_and(|name| name == "radeon") {
+            log::info!("legacy radeon GPU: using software rendering");
+            std::env::set_var("LIBGL_ALWAYS_SOFTWARE", "1");
+            return;
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn force_software_gl_on_legacy_radeon() {}
+
 fn main() {
     // The debug log bar's facade capture must exist before any
     // dependency logs: install it ahead of the window.
     let log_sink = console::logbar::LogSink::new();
     let log_level = console::logbar::initial_level();
     console::logbar::install_facade_logger(log_sink.clone(), log_level);
+
+    force_software_gl_on_legacy_radeon();
 
     gpui_kit::application()
         // Icon SVGs resolve through the asset source; without this every
