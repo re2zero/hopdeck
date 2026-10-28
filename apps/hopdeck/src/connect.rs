@@ -1022,8 +1022,8 @@ impl HopDeckConnection {
     /// onto UDP. The probe dials (and immediately closes) a throwaway UDP
     /// session first, so a network that still drops UDP costs only the
     /// probe budget and never interrupts the live TCP session. On success
-    /// the cached transport is cleared and the session is re-dialed under
-    /// `Auto`'s normal UDP-first plan.
+    /// the probe's answer seeds the cache and the session is re-dialed
+    /// under `Auto`'s normal UDP-first plan.
     ///
     /// Only meaningful for an *alive* session on TCP with
     /// [`TransportMode::Auto`]: a forced `Tcp` preference means the user
