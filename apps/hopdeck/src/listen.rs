@@ -632,46 +632,40 @@ fn spawn_accept_task(
 ) -> JoinHandle<()> {
     spawn_local(async move {
         loop {
-            // workaround for https://github.com/webrtc-rs/webrtc/issues/614
-            let sleep = tokio::time::sleep(Duration::from_secs(2));
-            tokio::select! {
-                _ = sleep => continue,
-                c = listener.accept() => match c {
-                    Ok((conn, addr)) => {
-                        register_accepted_conn(
-                            &listen_tx,
-                            &conns,
-                            &sessions,
-                            addr,
-                            &conn,
-                            &auth_gate,
-                        )
+            // Do not wrap this in `select!`/`timeout`: webrtc-dtls runs the
+            // entire DTLS handshake inside `DTLSListener::accept()`. Cancelling
+            // the future mid-handshake drops its state (the peer's ClientHello
+            // is consumed, but no reply is ever sent), so every inbound
+            // connection from a peer that doesn't complete within the deadline
+            // dies silently.
+            match listener.accept().await {
+                Ok((conn, addr)) => {
+                    register_accepted_conn(&listen_tx, &conns, &sessions, addr, &conn, &auth_gate)
                         .await;
-                    }
-                    Err(e) => {
-                        if let Error::Std(ref se) = e {
-                            if let Some(de) = se.0.downcast_ref::<webrtc_dtls::Error>() {
-                                match de {
-                                    webrtc_dtls::Error::ErrVerifyDataMismatch => {
-                                        if let Some(fingerprint) =
-                                            connection_attempts.lock().expect("lock").pop_front()
-                                        {
-                                            listen_tx
-                                                .send(ListenEvent::Rejected { fingerprint })
-                                                .expect("channel closed");
-                                        }
+                }
+                Err(e) => {
+                    if let Error::Std(ref se) = e {
+                        if let Some(de) = se.0.downcast_ref::<webrtc_dtls::Error>() {
+                            match de {
+                                webrtc_dtls::Error::ErrVerifyDataMismatch => {
+                                    if let Some(fingerprint) =
+                                        connection_attempts.lock().expect("lock").pop_front()
+                                    {
+                                        listen_tx
+                                            .send(ListenEvent::Rejected { fingerprint })
+                                            .expect("channel closed");
                                     }
-                                    _ => log::warn!("accept: {de}"),
                                 }
-                            } else {
-                                log::warn!("accept: {se:?}");
+                                _ => log::warn!("accept: {de}"),
                             }
                         } else {
-                            log::warn!("accept: {e:?}");
+                            log::warn!("accept: {se:?}");
                         }
+                    } else {
+                        log::warn!("accept: {e:?}");
                     }
-                },
-            };
+                }
+            }
         }
     })
 }
