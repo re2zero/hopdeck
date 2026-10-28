@@ -390,6 +390,18 @@ impl ClientManager {
             .unwrap_or_default()
     }
 
+    /// Update the configured transport preference. Returns `true` when
+    /// the value changed, so callers only persist/re-dial on real moves.
+    pub(crate) fn set_transport_mode(&self, handle: ClientHandle, mode: TransportMode) -> bool {
+        match self.clients.borrow_mut().get_mut(handle as usize) {
+            Some((c, _)) if c.transport != mode => {
+                c.transport = mode;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Whether any connect-side state mutated since the last poll,
     /// clearing the flag. The service re-broadcasts changed clients so
     /// frontends observe alive/commit/latency moves that no event
@@ -789,6 +801,20 @@ mod tests {
         assert!(!cm.take_client_states_dirty());
         assert!(cm.set_transport(handle, None));
         assert!(cm.take_client_states_dirty());
+    }
+
+    #[test]
+    fn transport_mode_updates_the_persisted_preference() {
+        let (cm, handle) = manager_with_ips(&[]);
+        assert_eq!(cm.transport_mode(handle), TransportMode::Auto);
+        assert!(cm.set_transport_mode(handle, TransportMode::Tcp));
+        assert_eq!(cm.transport_mode(handle), TransportMode::Tcp);
+        // The live display field is independent: changing the preference
+        // must not fabricate a session transport.
+        assert_eq!(cm.get_state(handle).unwrap().1.transport, None);
+        assert!(!cm.set_transport_mode(handle, TransportMode::Tcp));
+        assert!(cm.set_transport_mode(handle, TransportMode::Udp));
+        assert_eq!(cm.transport_mode(handle), TransportMode::Udp);
     }
 
     fn ip(a: u8) -> IpAddr {

@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use hopdeck_ipc::{
     ClientHandle, ConnectMode, CrossingModifier, FrontendRequest, IncomingPeerConfig, Position,
-    RemoteHostState,
+    RemoteHostState, TransportMode,
 };
 use std::net::IpAddr;
 
@@ -106,6 +106,13 @@ impl Console {
                                 cx.theme().secondary,
                                 cx.theme().secondary_foreground,
                             ))
+                            .when_some(entry.state.transport, |row, kind| {
+                                row.child(super::chip(
+                                    super::transport_live_label(kind),
+                                    cx.theme().accent.opacity(0.15),
+                                    cx.theme().accent,
+                                ))
+                            })
                             .child(self.render_cloud_badge(cx)),
                     ),
             )
@@ -200,6 +207,8 @@ impl Console {
         let cells = [
             ("共享位置", entry.position_label().into()),
             ("往返延迟", latency_label(&entry.state)),
+            // Live transport when a session is up, else the preference.
+            ("传输", super::transport_label(&entry.config, &entry.state)),
             ("对端版本", peer_version(&entry.state)),
             ("来源", SharedString::from("局域网")),
         ];
@@ -848,6 +857,12 @@ impl Console {
                 self.render_connect_mode_chips(edit, cx),
                 cx,
             ))
+            .child(self.render_edit_card(
+                "传输",
+                "自动先走 UDP，连不上再回退 TCP；仅 UDP 可关闭回退",
+                self.render_transport_chips(edit, cx),
+                cx,
+            ))
             .child(self.render_kv_section("输入映射", cx))
             .child(self.render_send_option_rows(edit, cx))
             .child(
@@ -967,6 +982,32 @@ impl Console {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if let Some(edit) = this.edit.as_mut() {
                             edit.connect_mode = mode;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    fn render_transport_chips(&self, edit: &EditDraft, cx: &mut Context<Self>) -> impl IntoElement {
+        let modes = [
+            ("edit-transport-auto", TransportMode::Auto, "自动"),
+            ("edit-transport-udp", TransportMode::Udp, "仅 UDP"),
+            ("edit-transport-tcp", TransportMode::Tcp, "仅 TCP"),
+        ];
+        let mut row = h_flex().items_center().gap_2();
+        for (id, mode, label) in modes {
+            let selected = edit.transport == mode;
+            row = row.child(
+                Button::new(id)
+                    .label(label)
+                    .small()
+                    .when(selected, |b| b.primary())
+                    .when(!selected, |b| b.ghost())
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if let Some(edit) = this.edit.as_mut() {
+                            edit.transport = mode;
                         }
                         cx.notify();
                     })),
@@ -1101,6 +1142,7 @@ impl Console {
             port,
             pos: config.pos,
             connect_mode: config.connect_mode,
+            transport: config.transport,
             command_as_ctrl: config.command_as_ctrl,
             require_crossing_modifier: config.require_crossing_modifier,
             crossing_modifier: config.crossing_modifier,
@@ -1181,6 +1223,12 @@ impl Console {
                 handle,
                 edit.connect_mode,
             ));
+            changed = true;
+        }
+        if old.transport != edit.transport {
+            // The daemon drops the live session so the new policy applies
+            // on the next dial, then echoes the updated config.
+            self.request(FrontendRequest::SetTransport(handle, edit.transport));
             changed = true;
         }
         if old.command_as_ctrl != edit.command_as_ctrl {

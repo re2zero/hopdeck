@@ -14,6 +14,7 @@
 
 use gpui::TestAppContext;
 use gpui_kit::base::test_support::{self, ElementSnapshot};
+use gpui_kit::component::WindowExt;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, ElementId, Entity, InputEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, Size, Window, WindowBounds, WindowOptions,
@@ -331,4 +332,52 @@ fn remote_host_lock_banner_tracks_daemon_transitions(cx: &mut TestAppContext) {
         require(window, "remote-state-banner".into());
     })
     .unwrap();
+}
+
+#[gpui::test]
+fn authorizing_elsewhere_closes_the_open_request_dialog(cx: &mut TestAppContext) {
+    // Field report: authorizing the fingerprint from the CLI/daemon side
+    // left the console's "远程设备请求连接" dialog on screen until the
+    // user clicked 忽略. The daemon's AuthorizedUpdated echo must
+    // dismiss it.
+    let (window, content) = open_console(cx);
+    let fingerprint = "aa:bb".repeat(10);
+    cx.update(|cx| {
+        content.update(cx, |console, _| {
+            console.auth_dialog_fingerprint = Some(fingerprint.clone());
+        });
+        // Open through the window handle (not a nested `update_window`)
+        // because the daemon-echo path under test closes the dialog via
+        // the same handle.
+        window
+            .update(cx, |_, window, cx| {
+                window
+                    .open_alert_dialog(cx, |alert, _, _| alert.title("远程设备请求连接").confirm());
+                assert!(window.has_active_dialog(cx), "dialog must be open");
+            })
+            .expect("open dialog");
+
+        content.update(cx, |console, cx| {
+            console.on_feed(
+                FeedEvent::Daemon(Box::new(FrontendEvent::AuthorizedUpdated(
+                    [(fingerprint.clone(), IncomingPeerConfig::default())]
+                        .into_iter()
+                        .collect(),
+                ))),
+                cx,
+            );
+            assert!(
+                console.auth_dialog_fingerprint.is_none(),
+                "the tracking field must clear with the dialog"
+            );
+        });
+        window
+            .update(cx, |_, window, cx| {
+                assert!(
+                    !window.has_active_dialog(cx),
+                    "authorization made elsewhere must close the dialog"
+                );
+            })
+            .expect("inspect dialog state");
+    });
 }

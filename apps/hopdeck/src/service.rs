@@ -653,6 +653,15 @@ impl Service {
                     }
                 }
             }
+            FrontendRequest::SetTransport(handle, mode) => {
+                if self.client_manager.set_transport_mode(handle, mode) {
+                    // Drop the live session: it rides the old policy and
+                    // would otherwise hide the new one until it dies.
+                    self.conn.reset_handle(handle).await;
+                    self.broadcast_client(handle);
+                    self.save_config().await;
+                }
+            }
             FrontendRequest::SetNetworkLock(handle, ip) => {
                 // Resolve the live network first (see SetConnectionMode).
                 self.refresh_network().await;

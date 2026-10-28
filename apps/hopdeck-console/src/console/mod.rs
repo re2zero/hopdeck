@@ -48,6 +48,7 @@ use self::logbar::{LogLevel, LogSink};
 use hopdeck_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectMode, CrossingModifier, DEFAULT_PORT,
     FrontendEvent, FrontendRequest, IncomingPeerConfig, Position, RemoteHostState, Status,
+    TransportKind, TransportMode,
 };
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -76,6 +77,11 @@ pub struct Console {
     /// retries while the user is deciding (or just declined) don't
     /// re-open the dialog every couple of seconds.
     last_auth_prompt: Option<(String, std::time::Instant)>,
+    /// Fingerprint of the authorization dialog currently on screen.
+    /// Tracked so an authorization made outside this frontend (CLI or
+    /// another console) can close the stale dialog; the dialog's
+    /// `on_close` clears it for every other dismissal path.
+    auth_dialog_fingerprint: Option<String>,
     /// Fingerprints parked at the daemon's authorization gate, with
     /// the most recent knock time (design D15's 待认证 state). The
     /// daemon re-fires `ConnectionAttempt` while the peer retries, so
@@ -242,6 +248,31 @@ fn connect_mode_label(mode: ConnectMode) -> &'static str {
     }
 }
 
+fn transport_live_label(kind: TransportKind) -> &'static str {
+    match kind {
+        TransportKind::Udp => "UDP",
+        TransportKind::Tcp => "TCP",
+    }
+}
+
+fn transport_preference_label(mode: TransportMode) -> &'static str {
+    match mode {
+        TransportMode::Auto => "自动",
+        TransportMode::Udp => "仅 UDP",
+        TransportMode::Tcp => "仅 TCP",
+    }
+}
+
+/// The device's transport as the frontend should show it: the transport
+/// the live session actually rides, or the configured preference while
+/// no session exists.
+fn transport_label(config: &ClientConfig, state: &ClientState) -> SharedString {
+    match state.transport {
+        Some(kind) => transport_live_label(kind).into(),
+        None => transport_preference_label(config.transport).into(),
+    }
+}
+
 /// The edit-form draft: input entities plus the two enum choices that
 /// render as chip buttons instead of text fields.
 struct EditDraft {
@@ -252,6 +283,7 @@ struct EditDraft {
     port: Entity<InputState>,
     pos: Position,
     connect_mode: ConnectMode,
+    transport: TransportMode,
     command_as_ctrl: bool,
     require_crossing_modifier: bool,
     crossing_modifier: CrossingModifier,
@@ -292,6 +324,7 @@ impl Console {
             retry_attempts: 0,
             retry_loop_running: false,
             last_auth_prompt: None,
+            auth_dialog_fingerprint: None,
             awaiting_auth: HashMap::new(),
             edit: None,
             authorized: HashMap::new(),
@@ -417,6 +450,7 @@ impl Console {
                     );
                 }
                 self.settle_pending_connect(handle, cx);
+                self.auto_close_authorized_dialog(cx);
             }
             FrontendEvent::Deleted(handle) => {
                 if let Some(entry) = self.entry(handle) {
@@ -468,6 +502,7 @@ impl Console {
                 }
                 self.awaiting_auth.retain(|fp, _| !keys.contains_key(fp));
                 self.authorized = keys;
+                self.auto_close_authorized_dialog(cx);
             }
             FrontendEvent::ConnectionAttempt { fingerprint } => {
                 self.awaiting_auth
@@ -477,6 +512,7 @@ impl Console {
             FrontendEvent::PasswordRequired { addr } => self.prompt_access_password(addr, cx),
             FrontendEvent::DeviceConnected { fingerprint, .. } => {
                 self.awaiting_auth.remove(&fingerprint);
+                self.auto_close_authorized_dialog(cx);
             }
             FrontendEvent::VideoState {
                 handle,
@@ -583,7 +619,18 @@ impl Console {
         {
             return;
         }
+        // Another dialog is already up (the access-password prompt, a
+        // remove confirmation): the knock stays in `awaiting_auth` and
+        // the peer's next retry re-asks once the dialog is gone.
+        let dialog_free = self
+            .window
+            .update(cx, |_, window, cx| !window.has_active_dialog(cx))
+            .unwrap_or(false);
+        if !dialog_free {
+            return;
+        }
         self.last_auth_prompt = Some((fingerprint.clone(), std::time::Instant::now()));
+        self.auth_dialog_fingerprint = Some(fingerprint.clone());
         self.journal(
             LogLevel::Info,
             format!(
@@ -594,12 +641,12 @@ impl Console {
         let writer = self.writer.clone();
         let input = self.auth_desc.clone();
         let window = self.window;
+        let entity = cx.entity();
         let _ = window.update(cx, move |_, window, cx| {
-            if window.has_active_dialog(cx) {
-                return;
-            }
             input.update(cx, |state, cx| state.set_value("", window, cx));
             window.open_alert_dialog(cx, move |alert, _, _| {
+                let close_entity = entity.clone();
+                let close_fingerprint = fingerprint.clone();
                 let fingerprint = fingerprint.clone();
                 let writer = writer.clone();
                 let input = input.clone();
@@ -626,8 +673,44 @@ impl Console {
                         true
                     })
                     .on_cancel(|_, _, _| true)
+                    // Every dismissal path (ok, cancel, Escape) clears
+                    // the tracking field, so a later `close_dialog`
+                    // never targets an unrelated dialog.
+                    .on_close(move |_, _, cx| {
+                        close_entity.update(cx, |this, _| {
+                            if this.auth_dialog_fingerprint.as_deref()
+                                == Some(close_fingerprint.as_str())
+                            {
+                                this.auth_dialog_fingerprint = None;
+                            }
+                        });
+                    })
             });
         });
+    }
+
+    /// An authorization made outside this frontend (CLI request, another
+    /// console) already answers the on-screen dialog's question. The
+    /// daemon echoes the updated authorized map, so close the stale
+    /// dialog instead of making the user dismiss it by hand.
+    fn auto_close_authorized_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(fingerprint) = self.auth_dialog_fingerprint.clone() else {
+            return;
+        };
+        if !self.authorized.contains_key(&fingerprint) {
+            return;
+        }
+        self.auth_dialog_fingerprint = None;
+        self.journal(
+            LogLevel::Info,
+            format!(
+                "{} 已在别处授权，关闭连接请求对话框",
+                short_fingerprint(&fingerprint)
+            ),
+        );
+        let _ = self
+            .window
+            .update(cx, |_, window, cx| window.close_dialog(cx));
     }
 
     /// The peer we dialed wants the access password (session admission
@@ -1114,10 +1197,17 @@ impl Console {
         let muted = cx.theme().muted_foreground;
         let mut tail = div().flex_shrink_0().text_xs();
         if entry.online() {
-            tail = tail
-                .text_color(muted)
-                .font_family(mono)
-                .child(latency_label(&entry.state));
+            // Transport first (UDP/TCP is the post-fallback question a
+            // user asks), latency second when the session measured one.
+            let latency = latency_label(&entry.state);
+            let label = match entry.state.transport {
+                Some(kind) if latency.as_str() != "—" => {
+                    format!("{} · {latency}", transport_live_label(kind))
+                }
+                Some(kind) => transport_live_label(kind).to_string(),
+                None => latency.to_string(),
+            };
+            tail = tail.text_color(muted).font_family(mono).child(label);
         } else if self.awaiting_authorization(entry) {
             tail = tail.text_color(cx.theme().warning).child("待认证");
         } else if entry.state.resolving || self.dial_in_flight(entry) {
@@ -1403,6 +1493,19 @@ fn needs_own_window_controls(client_decorated: bool) -> bool {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[test]
+    fn transport_label_prefers_the_live_transport_over_the_preference() {
+        let mut config = ClientConfig::default();
+        let mut state = ClientState::default();
+        assert_eq!(transport_label(&config, &state).as_str(), "自动");
+        config.transport = TransportMode::Tcp;
+        assert_eq!(transport_label(&config, &state).as_str(), "仅 TCP");
+        // Once a session exists its actual transport wins: a preference
+        // is not a fact about the live path.
+        state.transport = Some(TransportKind::Udp);
+        assert_eq!(transport_label(&config, &state).as_str(), "UDP");
+    }
 
     #[test]
     fn incoming_session_renders_as_online() {

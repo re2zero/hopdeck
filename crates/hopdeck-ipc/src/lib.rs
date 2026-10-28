@@ -844,6 +844,10 @@ pub enum FrontendRequest {
     /// ([`ConnectMode`]). `Reverse` also makes the daemon dial the
     /// peer proactively while the client is active.
     UpdateConnectMode(ClientHandle, ConnectMode),
+    /// Change the preferred transport for this client ([`TransportMode`]).
+    /// The daemon drops any live session so the new policy applies to
+    /// the next dial, broadcasts the updated config and persists it.
+    SetTransport(ClientHandle, TransportMode),
     /// Pin the outbound address to `ip` on the machine's *current*
     /// network. The daemon computes the network fingerprint, so the
     /// GUI only sends the chosen IP. Numeric only (never a hostname)
@@ -1221,6 +1225,20 @@ mod tests {
             FrontendRequest::ConnectTo(ip, port) => {
                 assert_eq!(ip.to_string(), "192.168.1.10");
                 assert_eq!(port, 4356);
+            }
+            other => panic!("wrong variant decoded: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frontend_request_set_transport_wire_shape_is_pinned() {
+        let request = FrontendRequest::SetTransport(3, TransportMode::Tcp);
+        let json = serde_json::to_string(&request).unwrap();
+        assert_eq!(json, r#"{"SetTransport":[3,"tcp"]}"#);
+        match serde_json::from_str(&json).unwrap() {
+            FrontendRequest::SetTransport(handle, mode) => {
+                assert_eq!(handle, 3);
+                assert_eq!(mode, TransportMode::Tcp);
             }
             other => panic!("wrong variant decoded: {other:?}"),
         }
