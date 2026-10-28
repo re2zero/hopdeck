@@ -907,6 +907,13 @@ async fn register_accepted_conn(
         );
         let _ = replaced.conn.close().await;
     }
+    // A peer that reconnects gets a new source port (TCP always, UDP
+    // usually), so the address-keyed table alone would keep the previous
+    // session alive until its read loop notices the close or hits the
+    // idle timeout — and both sessions could inject input in the
+    // meantime. One certificate fingerprint is one peer: the newest
+    // authenticated session supersedes every older one.
+    evict_peer_sessions(conns, sessions, addr, session, &fingerprint, listen_tx).await;
     if auth_gate.needs_challenge(&fingerprint) {
         log::info!(
             "withholding session for {addr} (unauthorized peer {fingerprint}) \
@@ -933,6 +940,58 @@ async fn register_accepted_conn(
         transport,
         auth_gate.clone(),
     ));
+}
+
+/// Close and forget every *other* live session belonging to the same
+/// peer fingerprint. Called right after a new session is registered, so
+/// at most one authenticated session per peer exists in the listener
+/// table.
+///
+/// Eviction removes the entry under the connection table's lock (a stale
+/// read loop must not be able to evict the survivor later), then closes
+/// the connection and publishes `Disconnected` for the evicted address
+/// so emulation-side bookkeeping is cleaned up immediately rather than
+/// when the old read loop eventually wakes.
+async fn evict_peer_sessions(
+    conns: &Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>>,
+    sessions: &ListenerSessions,
+    keep_addr: SocketAddr,
+    keep_session: ListenerSession,
+    fingerprint: &str,
+    listen_tx: &Sender<ListenEvent>,
+) {
+    let evicted = {
+        let mut guard = conns.lock().await;
+        let stale: Vec<(SocketAddr, ListenerSession)> = guard
+            .iter()
+            .filter(|(addr, slot)| {
+                **addr != keep_addr
+                    && slot.session != keep_session
+                    && slot.fingerprint == fingerprint
+            })
+            .map(|(addr, slot)| (*addr, slot.session))
+            .collect();
+        let mut removed = Vec::with_capacity(stale.len());
+        for (old_addr, old_session) in stale {
+            if let Some(slot) = remove_connection_if_current(&mut guard, old_addr, old_session) {
+                sessions.remove_if_current(old_addr, old_session);
+                removed.push((old_addr, slot));
+            }
+        }
+        removed
+    };
+    for (old_addr, slot) in evicted {
+        log::info!(
+            "closing superseded {} session {} from the same peer {fingerprint} at {old_addr}",
+            slot.transport,
+            slot.session
+        );
+        let _ = slot.conn.close().await;
+        let _ = listen_tx.send(ListenEvent::Disconnected {
+            addr: old_addr,
+            session: slot.session,
+        });
+    }
 }
 
 /// Supervisor task: owns the set of active listeners, watches for
@@ -1625,6 +1684,129 @@ mod tests {
                     ctx.conns.lock().await.is_empty(),
                     "an unauthorized peer must never enter the session table"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn registering_a_peer_evicts_its_old_session_at_another_address() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let old_addr: SocketAddr = "127.0.0.1:4001".parse().expect("old address");
+                let keep_addr: SocketAddr = "127.0.0.1:4002".parse().expect("keep address");
+                let other_addr: SocketAddr = "127.0.0.1:4003".parse().expect("other address");
+                let (listen_tx, mut listen_rx) = channel();
+                let sessions = ListenerSessions::default();
+                let old_session = sessions.allocate(old_addr);
+                let keep_session = sessions.allocate(keep_addr);
+                let other_session = sessions.allocate(other_addr);
+                let conns: Rc<AsyncMutex<HashMap<SocketAddr, AcceptedConnection>>> =
+                    Rc::new(AsyncMutex::new(HashMap::from([
+                        (
+                            old_addr,
+                            AcceptedConnection {
+                                session: old_session,
+                                conn: test_conn().await,
+                                fingerprint: "aa".into(),
+                                transport: TransportKind::Udp,
+                            },
+                        ),
+                        (
+                            keep_addr,
+                            AcceptedConnection {
+                                session: keep_session,
+                                conn: test_conn().await,
+                                fingerprint: "aa".into(),
+                                transport: TransportKind::Tcp,
+                            },
+                        ),
+                        (
+                            other_addr,
+                            AcceptedConnection {
+                                session: other_session,
+                                conn: test_conn().await,
+                                fingerprint: "bb".into(),
+                                transport: TransportKind::Udp,
+                            },
+                        ),
+                    ])));
+
+                evict_peer_sessions(&conns, &sessions, keep_addr, keep_session, "aa", &listen_tx)
+                    .await;
+
+                {
+                    let guard = conns.lock().await;
+                    assert!(!guard.contains_key(&old_addr), "superseded peer removed");
+                    assert!(guard.contains_key(&keep_addr), "newest session kept");
+                    assert!(
+                        guard.contains_key(&other_addr),
+                        "a different peer is untouched"
+                    );
+                }
+                assert_eq!(sessions.current.borrow().get(&old_addr), None);
+                match listen_rx.recv().await.expect("disconnect event") {
+                    ListenEvent::Disconnected { addr, session } => {
+                        assert_eq!(addr, old_addr);
+                        assert_eq!(session, old_session);
+                    }
+                    _ => panic!("expected a Disconnected event for the superseded session"),
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(50), listen_rx.recv())
+                        .await
+                        .is_err(),
+                    "only the superseded session is reported"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_from_a_new_ephemeral_port_supersedes_the_old_session() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let server_cert = self_signed();
+                let client_cert = self_signed();
+                let fingerprint = crypto::certificate_fingerprint(&client_cert);
+                let (ctx, mut events) =
+                    tcp_context(&server_cert, std::slice::from_ref(&fingerprint), None);
+
+                let (first_addr, _first_client) = run_tls_accept(&ctx, &client_cert).await;
+                let first_session = match events.recv().await.expect("first accept") {
+                    ListenEvent::Accept { addr, session, .. } => {
+                        assert_eq!(addr, first_addr);
+                        session
+                    }
+                    _ => panic!("expected an Accept for the first session"),
+                };
+
+                let (second_addr, _second_client) = run_tls_accept(&ctx, &client_cert).await;
+                assert_ne!(
+                    first_addr, second_addr,
+                    "a TCP reconnect uses a fresh ephemeral port"
+                );
+                // Emulation hears about the replacement in order: tear down
+                // the old handle first, then accept the new one.
+                match events.recv().await.expect("superseded disconnect") {
+                    ListenEvent::Disconnected { addr, session } => {
+                        assert_eq!(addr, first_addr);
+                        assert_eq!(session, first_session);
+                    }
+                    _ => panic!("expected the old session to be disconnected"),
+                }
+                match events.recv().await.expect("second accept") {
+                    ListenEvent::Accept { addr, session, .. } => {
+                        assert_eq!(addr, second_addr);
+                        assert_ne!(session, first_session);
+                    }
+                    _ => panic!("expected an Accept for the second session"),
+                }
+
+                let conns = ctx.conns.lock().await;
+                assert_eq!(conns.len(), 1, "only the newest session stays live");
+                assert!(conns.contains_key(&second_addr));
             })
             .await;
     }
