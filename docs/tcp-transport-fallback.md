@@ -1,6 +1,6 @@
 # TCP/TLS 传输回退：实施计划
 
-状态：提案（Phase 1 待实施）
+状态：Phase 1–2 已实施（Phase 3 未做）
 日期：2026-10-28
 适用版本：HopDeck 0.17.1
 相关机器：10.8.12.63（UOS 20，AMD Oland）↔ 10.8.15.62（UOS 25，AMD Caicos）
@@ -334,11 +334,11 @@ enum TransportMode { Auto, Udp, Tcp } // serde: auto | udp | tcp，默认 Auto
 
 ### Phase 2（体验/健壮性）
 
-- [ ] 控制台显示“UDP/TCP”，允许 `transport` 选择（`FrontendRequest::SetTransport`）；
-- [ ] 传输选择持久化（per-client `last_transport`）+ 定期后台 UDP 重探；
-- [ ] 入站会话按指纹/IP 去重（解决 TCP 临时端口导致同一 peer 多 session 的问题）；
+- [x] 控制台显示“UDP/TCP”，允许 `transport` 选择（`FrontendRequest::SetTransport`）；
+- [x] 传输选择持久化（per-client `last_transport`）+ 定期后台 UDP 重探；
+- [x] 入站会话按指纹/IP 去重（解决 TCP 临时端口导致同一 peer 多 session 的问题）；
 - [ ] TCP 心跳/keepalive、事件合并（鼠标移动）、性能测量；
-- [ ] `ConnectionAttempt` 去重与授权提示体验。
+- [x] `ConnectionAttempt` 去重与授权提示体验（外部授权后自动关闭弹窗）。
 
 ### Phase 3（受限网络）
 
@@ -441,6 +441,53 @@ PATH="$HOME/.cargo/bin:$PATH" LIBRARY_PATH="$HOME/.local/lib/hopdeck-build" \
 5. `Auto` 的 UDP 预算 2 秒是否合适？是否需要按网络历史自适应？
 
 ---
+
+## 12. Phase 2 实施记录（2026-10-28）
+
+### 控制台（A 组）
+
+- 设备行右侧在延迟前显示实际传输（`UDP · 0.3 ms`）；详情页头部加传输 chip，
+  概览格显示“传输 = 实际传输 / 未连接时的偏好（自动、仅 UDP、仅 TCP）”。
+- “修改配置”表单新增“传输”三选一（自动 / 仅 UDP / 仅 TCP），保存时发
+  `FrontendRequest::SetTransport(handle, mode)`。daemon 更新 `ClientConfig.transport`、
+  断开当前会话（让新策略在下一次拨号生效）、广播 `State` 并写盘；`auto` 保持
+  隐式，不新增配置键（与旧行为一致）。
+- 授权弹窗记录当前展示的指纹；`AuthorizedUpdated` / `State` / `DeviceConnected`
+  发现该指纹已进入授权表（例如通过 CLI 或另一个前端授权）时自动关闭弹窗。
+  弹窗的 `on_close` 统一清理跟踪字段，避免误关其他对话框。
+
+### 传输持久化与 UDP 重探（B 组）
+
+- `ClientConfig.last_transport: Option<TransportKind>` 记录最近一次*建立成功*
+  的会话传输；`TomlClient` 同名可选字段，未知/从未连接时不写盘。
+- daemon 的 2 秒同步 tick 发现 `last_transport` 变化时写入 config；出站拨号成功、
+  反向采纳、入站 `Connected` 三处都会记录。
+- 拨号前缓存优先：内存缓存 → 持久化 `last_transport` → 默认。重启后第一次拨号
+  直接使用上次成功的传输，不再等 2 秒 UDP 预算。
+- 后台每 10 分钟（`UDP_REPROBE_INTERVAL`）对 `auto` + 实际 TCP + alive 的客户端
+  做一次 UDP 探测：先拨一个一次性的 UDP 会话（2 秒预算），成功则立即关闭探测连接、
+  把缓存置为 UDP、断开 TCP 会话并通过正常拨号路径重连；失败则只记日志，绝不打断
+  正在工作的 TCP 会话。
+- 注意：探测成功后的重拨必须把缓存**写入** UDP（而不是删除缓存），否则拨号会回退
+  到持久化的 `last_transport`（TCP），再次选回 TCP。
+
+### 入站会话去重（C 组）
+
+- `register_accepted_conn` 注册新会话后，按证书指纹驱逐同一 peer 的其他所有会话
+  （不同源端口、不同传输），先移除表项/会话代次，再关闭连接并发送
+  `ListenEvent::Disconnected`，最后才发布新的 `Accept`。这样 emulation 先拆旧
+  handle 再建新 handle，不会出现同一 peer 双 session 同时注入。
+- 与地址无关：多网卡 peer 从不同 IP 接入也只保留最新会话；不同指纹不受影响。
+- `take_conn`（反向采纳）从表中取走的连接不受影响；同地址替换的既有语义不变。
+
+### 本轮未做
+
+- B 组第 5 项（TCP keepalive、鼠标移动事件合并、性能测量）：暂无真实需求，未实现。
+- Phase 3（可配置 TCP 端口/ALPN、中继/会合、视频 TCP）：明确不做。
+- 现场 v25 验证本轮未做（无免密 SSH，未获取密码）。本机双实例 E2E 已覆盖：
+  Auto→UDP、SetTransport→TCP 并写盘、`auto` 不写盘、重启后按 `last_transport`
+  选路、10 分钟重探（测试时临时改为 15 秒）切回 UDP、重探期间接收端按指纹驱逐
+  旧 TCP 会话。
 
 ## 附录 A：现场验证记录（2026-10-28）
 

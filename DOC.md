@@ -178,15 +178,28 @@ Rules of the design:
   then TCP. A peer that answers and refuses us at the security layer is
   reachable, so no fallback is attempted (no duplicate authorization prompts).
   `"udp"` restores the historical behavior; `"tcp"` forces the framed path.
-  The last successful transport is cached per peer in memory so reconnects skip
-  the failed path; a daemon restart probes UDP again.
+  The last successful transport is cached per peer
+  (`ClientConfig::last_transport`, persisted; omitted until a session actually
+  comes up) so reconnects and daemon restarts skip the failed path.
+- **Return to UDP.** While an Auto peer rides TCP, a background tick every ten
+  minutes probes it over UDP. The probe is a throwaway UDP session that is
+  closed immediately: if it handshakes, the cache is seeded with UDP and the
+  real session re-dials through the normal connect path; if not, the live TCP
+  session is never touched.
+- **One session per peer.** Inbound sessions are deduplicated by certificate
+  fingerprint: registering a new session closes every older session from the
+  same peer (any source port/transport) and publishes its `Disconnected` event
+  before the new `Accept`, so a TCP reconnect's fresh ephemeral port can never
+  leave a second injecting session behind.
 - **Per-IP listeners.** Every local address binds UDP and TCP; a TCP bind
   failure only logs a warning and leaves UDP serving. Each accepted TCP
   connection runs its TLS handshake on its own task, so a slow client cannot
   stall the accept loop.
 
-`ClientState.transport` reports the live session's transport; the console shows
-it next to the peer (Phase 2 wires the UI switch for the preference).
+`ClientState.transport` reports the live session's transport. The console shows
+it in the device row and detail header and lets the user switch the preference
+(`auto` / `udp` / `tcp`) from the edit form via `FrontendRequest::SetTransport`;
+the daemon drops the live session so the new policy applies to the next dial.
 
 ## Reverse Tunnel Forwarding (M2c)
 

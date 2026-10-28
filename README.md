@@ -634,8 +634,13 @@ detects that without configuration: with `transport = "auto"` (the default) it
 dials UDP first, and if no UDP handshake completes within about two seconds it
 retries the same peer over TLS 1.3 on TCP, using the same port, the same
 certificate, the same fingerprint authorization and the same access password.
-Once TCP worked, reconnects try TCP first (in memory only — a daemon restart
-re-probes UDP), so the fallback costs nothing after the first session.
+Once TCP worked, reconnects try TCP first, so the fallback costs nothing after
+the first session. That choice is persisted per client (`last_transport`), so a
+daemon restart dials the working path immediately instead of repeating the
+probe; while the peer stays on TCP, the daemon re-probes UDP every ten minutes
+and moves the session back as soon as UDP is reachable again. The console shows
+the live transport next to the device and lets you pin `auto` / `udp` / `tcp`
+in the device's 修改配置 form.
 
 A peer that answers and *refuses* us (unknown fingerprint, wrong access
 password) is reachable: Auto does not retry it over TCP, so you never get two
