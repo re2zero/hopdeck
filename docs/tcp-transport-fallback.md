@@ -1,7 +1,7 @@
 # TCP/TLS 传输回退：实施计划
 
-状态：Phase 1–2 已实施（Phase 3 未做）
-日期：2026-10-28
+状态：Phase 1–2 已实施并现场验证（Phase 3 未做）
+日期：2026-10-28（2026-10-29 补充 Phase 2 现场记录）
 适用版本：HopDeck 0.17.1
 相关机器：10.8.12.63（UOS 20，AMD Oland）↔ 10.8.15.62（UOS 25，AMD Caicos）
 
@@ -480,14 +480,32 @@ PATH="$HOME/.cargo/bin:$PATH" LIBRARY_PATH="$HOME/.local/lib/hopdeck-build" \
 - 与地址无关：多网卡 peer 从不同 IP 接入也只保留最新会话；不同指纹不受影响。
 - `take_conn`（反向采纳）从表中取走的连接不受影响；同地址替换的既有语义不变。
 
+### 现场验证（2026-10-29，10.8.12.63 → v25 10.8.15.62）
+
+新 deb 安装到 v25 后逐项验证：
+
+- 本机（Auto）→ v25：UDP 2 秒无握手后回退 TCP，`alive=true`、`transport=tcp`；
+  本机配置写入 `last_transport = "tcp"`。
+- 重启本机 daemon 再连：日志 `plan: [Tcp, Udp]`，直接 TCP 建连，不再等 2 秒。
+- v25 控制台：设备行显示 `TCP · 0.2 ms`，详情“传输”格显示 `TCP`，头部传输
+  chip 可见（首次现场发现 chip 用了 accent 前景色，浅色主题下白底白字不可读，
+  已改用 info 色）。
+- 外部授权关闭弹窗：在 v25 移除本机指纹后重拨，v25 弹出「远程设备请求连接」；
+  通过 v25 的 IPC（控制台之外）执行 `AuthorizeKey`，弹窗自动关闭，无需手点
+  “忽略”。
+- 10 分钟重探：在真实单向 UDP 网络下，探测 2 秒超时并记录
+  `UDP reprobe failed (not connected) — staying on TCP`，live TCP 会话保持
+  `alive=true`、`transport=tcp`，未被打断（该失败日志原为 debug，release 会
+  编译掉，已改为 info）。
+- v25 入站侧：`incoming=true`、`transport=tcp`、`last_transport=tcp` 落盘。
+
 ### 本轮未做
 
 - B 组第 5 项（TCP keepalive、鼠标移动事件合并、性能测量）：暂无真实需求，未实现。
 - Phase 3（可配置 TCP 端口/ALPN、中继/会合、视频 TCP）：明确不做。
-- 现场 v25 验证本轮未做（无免密 SSH，未获取密码）。本机双实例 E2E 已覆盖：
-  Auto→UDP、SetTransport→TCP 并写盘、`auto` 不写盘、重启后按 `last_transport`
-  选路、10 分钟重探（测试时临时改为 15 秒）切回 UDP、重探期间接收端按指纹驱逐
-  旧 TCP 会话。
+- 本机双实例 E2E 另覆盖了现场无法制造的分支：Auto→UDP、`SetTransport→TCP`
+  并写盘、`auto` 不写盘、10 分钟重探（测试时临时改为 15 秒）成功切回 UDP、
+  重探期间接收端按指纹驱逐旧 TCP 会话。重探成功分支在 v25 单向网络下无法触发。
 
 ## 附录 A：现场验证记录（2026-10-28）
 
