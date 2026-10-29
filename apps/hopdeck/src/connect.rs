@@ -1087,7 +1087,10 @@ impl HopDeckConnection {
                 true
             }
             Err(failures) => {
-                log::debug!(
+                // Info, not debug: release builds compile debug logging out,
+                // and "why am I still on TCP?" is the question this line
+                // answers in the field. One line per probe interval.
+                log::info!(
                     "client {handle}: UDP reprobe failed ({}) — staying on TCP",
                     failures.into_error()
                 );
