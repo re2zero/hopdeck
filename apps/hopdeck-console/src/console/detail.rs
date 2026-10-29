@@ -109,8 +109,8 @@ impl Console {
                             .when_some(entry.state.transport, |row, kind| {
                                 row.child(super::chip(
                                     super::transport_live_label(kind),
-                                    cx.theme().accent.opacity(0.15),
-                                    cx.theme().accent,
+                                    cx.theme().info.opacity(0.15),
+                                    cx.theme().info,
                                 ))
                             })
                             .child(self.render_cloud_badge(cx)),
